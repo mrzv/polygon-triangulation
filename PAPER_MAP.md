@@ -21,6 +21,10 @@ to a triangulation is a separate linear-time reduction cited to earlier papers
 (§1, pp.486–487; Theorem 4.3, p.521). That reduction is a required implementation
 dependency, not something to replace with ear clipping.
 
+The next-layer contracts are specified in
+[GEOMETRY_BOUNDARY_SPEC.md](GEOMETRY_BOUNDARY_SPEC.md): exact affine normalization,
+curve-local boundary occurrences, chord routes, arc weights, and seam/padding.
+
 ## 1. Reading order and deliverables
 
 | Paper location | Construction / result | What it supplies to implementation |
@@ -51,9 +55,9 @@ adjacency is insufficient.
 Section 2 initially assumes distinct y-coordinates for distinct input vertices
 (p.488). It delegates degeneracy handling to symbolic perturbation, references
 [10] and [31]. The main visibility construction takes a simple **nonclosed**
-polygonal curve C. Section 2.4 says closed curves can be handled by puncturing a
-small hole (p.497); the executable seam construction and reversal still need to be
-specified for polygon input.
+polygonal curve C. Section 2.4 permits puncturing a small hole for closed input
+(p.497). The geometry/boundary specification supplies an exact-rational affine
+normalization and an explicit seam construction as alternatives to infinitesimals.
 
 The ambient space is the paper's spherical plane, not the Euclidean plane with a
 single generic outside sentinel. Its identifications are (§2, p.489):
@@ -74,8 +78,8 @@ No actual numerical thickening is performed (§2.1, pp.490–491).
 
 - An ordinary interior vertex has two companion boundary occurrences.
 - An interior y-extremum has four boundary occurrences: two adjacent duplicates
-  on each side, with companion relationships across sides. The inside duplicates
-  are joined by a null-length chord.
+  on each side, with companion pairing within each side (p.490). The inside pair
+  is joined by a null-length chord.
 - A curve endpoint has two adjacent companions/duplicates, on opposite sides.
 - Every intrinsic vertex of ∂C has one incident visibility-map chord. Every
   boundary point has an assigned horizontal direction.
@@ -286,7 +290,8 @@ saved chain maps/oracles. For a region R:
    pieces. Build canonical maps for those pieces using Lemma 4.1.
 2. Merge them with the region's exit chords as temporary **input edges**, producing
    a smaller-granularity map of R's boundary minus a vertex (an open curve).
-   The temporary exits must not be removable during those merges.
+   Symbolically tilt the temporary exits before merging (p.519); they must not
+   be removable during those merges.
 3. Reinterpret those input edges as chords, restoring conformality where needed.
 4. Keep only chords with both endpoints on R's side-aware boundary arcs.
 5. Combine the refinements, then enforce full granularity by chord removal.
@@ -332,7 +337,7 @@ general-purpose persistent trees.
 
 | Proposed component | State and operations | Invariant / acceptance evidence |
 |---|---|---|
-| `geometry` | Predicates, exact hit comparisons, symbolic y-order, chord routes | Side-aware nearest hits; coherent perturbation without numerical epsilons |
+| `geometry` | Predicates, exact hit comparisons, strict affine y-order, chord routes | Side-aware nearest hits; exact-rational normalization without numerical epsilons |
 | `boundary` | Input edge IDs, boundary occurrences, companions, intrinsic vs inserted endpoints, clipped arcs | Extrema/endpoints retain multiplicity; double-backing and null arcs preserved |
 | `submap` | Map-local arc/chord/region IDs, dual adjacency, canonical arc table, endpoint markers | Degree, actual weights, endpoint cleanup, canonical order, double identification |
 | `decomposition` | Internal chord / leaf region binary tree | Three-quarters split, logarithmic depth; rebuilt at the stated cost |
@@ -353,10 +358,10 @@ are explicit; do not clone full maps merely to avoid borrow conflicts.
 
 ## 10. Implementation sequence and gates
 
-1. **Geometry and boundary specification:** choose the coordinate/predicate model,
-   symbolic perturbation, companion indexing, finite/wrapping routes, seam and
-   padding semantics. Work through the extrema/endpoint figures and local
-   orientation cases before mutation code.
+1. **Geometry and boundary specification:** contracts are recorded in
+   [GEOMETRY_BOUNDARY_SPEC.md](GEOMETRY_BOUNDARY_SPEC.md), including exact-rational
+   normalization, companion indexing, routes, and seam/padding. Exercise these
+   rules before mutation code.
 2. **Normal form:** construct small maps, perform augmentation/deletion with
    endpoint cleanup, compute actual weights, double identification, and balanced
    decomposition. Prove invariants on empty/null regions as well as ordinary ones.
@@ -388,15 +393,16 @@ as full code-level procedures:
 |---|---|---|
 | Visibility map to triangulation | Paper references [6], [11]: [Chazelle–Incerpi (1984)](https://doi.org/10.1145/357337.357340), [Fournier–Montuno (1984)](https://doi.org/10.1145/357337.357341) | Actual linear routine, original-vertex output, seam handling |
 | Linear-time planar separator | Reference [21]: [Lipton–Tarjan (1979)](https://doi.org/10.1137/0136016); recursive use references [22] | Construct separators, not just assume the theorem; preserve bounds for disconnected recursive subgraphs |
-| Symbolic perturbation | Paper references [10], [31] | One consistent ordering and incidence model for equal-y/horizontal geometry, compatible with original output |
+| Distinct-y input | Paper references [10], [31] use symbolic perturbation; geometry/boundary spec §2 instead chooses exact affine normalization | Implement rational predicates and account separately for bit costs; no numerical epsilons |
 | Boundary and shielding cases | §§2.1, 2.5; fusion startup pp.503–504; witness search pp.509–510 | Explicit cyclic-order rules, permitted endpoint contacts, first/last intersection semantics, extrema startup deformation |
+| Temporary exit-edge deformation | §4.2 p.519, Fig.4.1 | Specify consistent symbolic tilting and reversal before refinement; ordinary merge does not accept unchanged horizontal exit edges |
 | Arithmetic domain and storage updates | Geometric primitives and normal-form representation throughout | Robust nearest-hit predicates; non-additive contraction weights; succinct updates with no hidden scans/copies |
-| Closed seam and power-of-two padding | §2.4 p.497; §4 p.516; down-phase pp.519–520 | Concrete construction, symbolic temporary edges, and elimination of artificial features |
+| Closed seam and power-of-two padding | §2.4 p.497; §4 p.516; geometry/boundary spec §8 | Implement the specified construction and closure surgery; connect it to the external triangulation reduction |
 
 The main paper's relevant sections and formulas were inspected; the external
 reduction, separator, and perturbation papers have **not** been fully analyzed in
 this map. Their links identify dependencies, not verified implementations.
 
-**Next bounded deliverable:** a Rust-oriented geometry/boundary specification with
-explicit occurrence tables and mutation contracts, followed by the normal-form
-kernel. Do not start the top-level triangulator before those contracts are fixed.
+**Next bounded deliverable:** the immutable-input and normal-form boundary kernel
+implementing the geometry/boundary contracts. Shielding and fusion startup still
+need their own constructive specifications before the merge layer.
