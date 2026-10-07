@@ -1,8 +1,8 @@
 # Geometry and double-boundary specification
 
-This is the next implementation contract after [PAPER_MAP.md](PAPER_MAP.md).
-It specifies the geometry/boundary layer, not a triangulator or a Rust API already
-implemented. **Paper facts** are cited to Chazelle's
+This specifies the geometry/boundary layer after [PAPER_MAP.md](PAPER_MAP.md).
+Its rational input and normal-form kernel are implemented in Rust; this is not
+yet a complete triangulator. **Paper facts** are cited to Chazelle's
 [1991 paper](https://www.cs.princeton.edu/~chazelle/pubs/polygon-triang.pdf);
 **decisions and derivations** below are our implementation choices. Printed pages
 490–491, 493–499, and 516 are the principal sources.
@@ -10,15 +10,17 @@ implemented. **Paper facts** are cited to Chazelle's
 ## 1. Input, coordinates, and ownership
 
 **Decision:** accept exact rational coordinates, with integers as the denominator-1
-case. Plan to use `num-bigint` and `num-rational` in Rust. No rounded floating-point
+case. Rust uses `num-bigint` and `num-rational`. No rounded floating-point
 predicates, numeric epsilons, or coordinate-range-dependent overflow fallbacks.
 The cost of big-integer arithmetic is separate from the paper's operation bound.
 
 Polygon input is an ordered list of n ≥ 3 distinct vertices, with implicit last-to-
 first closure. It must be simple, with nonzero edges and nonzero enclosed area.
 Collinear consecutive edges are allowed when they do not overlap or backtrack.
-There is no repeated closing vertex in the list. Simplicity is a caller
-precondition: an O(n²) validator must not be hidden in the triangulator.
+There is no repeated closing vertex in the list. Simplicity and pairwise
+distinctness are caller preconditions. Production checks reject zero-length
+adjacent edges; neither an O(n²) validator nor expected-time hashing is hidden
+in input preprocessing.
 
 An open input curve has at least one edge. A zero-edge piece is a point/null arc,
 not a visibility map of a curve. An open curve must also be simple and have no
@@ -270,6 +272,12 @@ that changes their topology. Use a construction state without query access while
 merging, then reconstruct normal form at the paper's charged cost. Do not expose
 stale queries or add a general dynamic-tree requirement.
 
+Publication compacts live outer arenas **and** every surviving region's arc/exit
+vector capacity; coarse saved maps must not retain storage from a finer map.
+Map-local IDs expire during this republication. Coarsening rechecks at most four
+surviving neighbors after each contraction, preserving the degree/actual-weight
+predicate while handling degree eligibility changed by null-leaf deletion.
+
 ### Joining two curve scopes
 
 Let C₁ end where C₂ begins. Copying endpoint occurrence IDs into the result is
@@ -376,9 +384,65 @@ The first kernel must support these consumer-visible cases:
 - Seam/padding introduces no equal Y, preserves original-level intersections,
   and never leaks a synthetic original-vertex ID.
 
-The geometry and occurrence rules can be exercised independently with exact
-rational calculations before the kernel exists. This specification does not
-claim that shielding, fusion startup, planar separators, the down-phase, or the
-external triangulation reduction have been implemented or fully specified.
-The next deliverable is the immutable-input and normal-form boundary kernel,
-with actual execution and regression coverage for these transitions.
+The kernel now executes these transitions with exact rational geometry. The
+closed-map path accepts borrowed original point tables and emits nondegenerate
+CCW original-ID triangles; it does not copy the input geometry into the reducer.
+`base::full_visibility` is restricted to a fixed 16-edge leaf, not a scanning
+fallback for arbitrary curves. Common-vertex source/contact flags are executable,
+but full fusion, shielding, and symbolic down-phase integration remain required.
+
+## 10. Temporary local geometry for down-phase refinement
+
+**Derived contract, not implemented:** the p.519 tilt must support coincident
+caps, repeated opposite-side arcs, null transitions, and exits through horizontal
+infinity without changing or rebuilding saved original-chain maps.
+
+- Give each R-facing side run a lazy normal lane. For forward edge vector d,
+  use N = (−dy, dx)/(|dx| + |dy|) and support p + sδN + td, where s is +1 on
+  Left and −1 on Right. Interior vertices are intersections of adjacent shifted
+  supports; positive collinear continuation uses the shared normal directly.
+  Vertex evaluation uses only its constant-many neighbors.
+- At constant-many junctions, trim branches on a formal rational diamond and
+  route paired lane ports through an inner collar in their inherited ribbon
+  rotation. Nested port intervals get nested collar heights. Straight independent
+  endpoint slides are insufficient: coincident cap ports with the same original
+  germ can produce an overlapping bridge.
+- Apply a common lower-order Y → Y + ηX only to finite supports and collars.
+  Applying that shear across horizontal infinity would give incompatible seam
+  limits. Instead compact U = X/(1 + |X|), interpolate U and Y along an unwrapped
+  route-preserving bridge, and fold at most once at the seam. One seam token
+  identifies both representations of the same crossing.
+- A retained chord needs a normalized common level descriptor: a displaced
+  original-vertex level when inherited from one, or a frozen exact rational
+  level for an arbitrary augmentation. New contacts inherit this descriptor,
+  not a recursively embedded intersection expression. Equal physical
+  subdivisions share their level program.
+- Reevaluate nonintrinsic retained endpoints from their shifted supporting edge
+  and common level. Old rational parameters and old rational Wrap levels are
+  not valid symbolic clipping thresholds. Saved decomposition/separator topology
+  can be reused only with descriptor-aware endpoint and level comparisons.
+- Preserve source occurrence, side/slot, route, and OriginalArc/ProtectedExit/
+  Collar/Bridge/Seam provenance through collapse. Cancel common factors before
+  limits; coordinate deduplication alone cannot distinguish a cap, intrinsic
+  Null, and a full-circle Wrap.
+- Keep authoritative old exits. A discarded helper separator can have a remote
+  original-support contact: the bottom of a start-cap collar for
+  (0,0) → (0,2) → (4,3) → (4,−2) sees x = 4, with limiting contact (4,0).
+  Consequently, locality of the helper's source does **not** imply locality of
+  its other endpoint. Repairing erased intrinsic occurrences alone is not yet
+  an arc-weight proof.
+- Before discarding a separator, require a replacement correspondence: an
+  authoritative protected exit or regenerated original-side separator must
+  preserve each nonlocal original-arc cut, with the correct side/slot and route.
+  Coincident blockers may require partitioning its limiting route into legal
+  original visibility intervals; merely checking its two endpoint labels is
+  insufficient. A bounded replacement-chain argument is still a proof gate,
+  including augmentations whose level coincides with an original vertex.
+- Restore conformality **after** quotient/filtering and those replacements.
+  Conformality alone cannot fix an oversized arc in a region with at most four
+  exits. Publish only after actual original positive-length arc weights satisfy
+  the refinement scale; a full-chain scan is not an admissible repair.
+- Each local program has constant-many symbolic priorities and bounded
+  expression depth; it is discarded after collapse. Saved geometry is neither
+  scanned nor copied. These are constraints on the intended geometric-operation
+  ledger, not an implemented refinement or a linear big-integer bit-cost bound.
