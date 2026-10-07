@@ -8,12 +8,11 @@ Discrete & Computational Geometry **6**, 485–524 (1991).
 
 The target is deterministic worst-case linear-time triangulation of an arbitrary
 simple polygon, not just a convex polygon and not Seidel's randomized algorithm.
-This document maps the construction and its proof obligations. Rust components
-now implement the input/boundary kernel, normal form, separator, saved-chain
-queries, and closed-map reduction. The complete fusion/up-phase/down-phase
-triangulator is not implemented yet; the status and remaining gates below make
-that distinction explicit. Rust layouts are implementation choices, not paper
-definitions.
+The Rust implementation now includes the complete construction: exact input and
+boundary geometry, saved-chain fusion/restoration and separator queries, local
+symbolic refinement, closed-map conversion, and original-vertex triangulation.
+This document separates paper definitions and bounds from derived implementation
+choices. It is a source map, not a machine-checked correctness or runtime proof.
 
 Citations use printed journal pages. In the linked 40-page PDF, PDF page = journal
 page − 484. The PDF is scanned: OCR was used for navigation, with the definitions,
@@ -24,7 +23,7 @@ to a triangulation is a separate linear-time reduction cited to earlier papers
 (§1, pp.486–487; Theorem 4.3, p.521). That reduction is a required implementation
 dependency, not something to replace with ear clipping.
 
-The next-layer contracts are specified in
+The executable geometry contracts are specified in
 [GEOMETRY_BOUNDARY_SPEC.md](GEOMETRY_BOUNDARY_SPEC.md): exact affine normalization,
 curve-local boundary occurrences, chord routes, arc weights, and seam/padding.
 
@@ -342,8 +341,8 @@ big-integer/rational work is not automatically unit-cost.
 ## 9. Rust component contracts and implementation status
 
 Keep compact indexed storage, one shared input, and reusable buffers over copied
-geometry or general-purpose persistent trees. The table describes responsibilities;
-the checkpoint below distinguishes implemented components from remaining stages.
+geometry or general-purpose persistent trees. The table describes the implemented
+responsibilities; the API and publication contracts follow it.
 
 | Component | State and operations | Invariant / acceptance evidence |
 |---|---|---|
@@ -351,11 +350,11 @@ the checkpoint below distinguishes implemented components from remaining stages.
 | `boundary` | Input edge IDs, boundary occurrences, companions, intrinsic vs inserted endpoints, clipped arcs | Extrema/endpoints retain multiplicity; double-backing and null arcs preserved |
 | `submap` | Map-local arc/chord/region IDs, dual adjacency, canonical arc table, endpoint markers | Degree, actual weights, endpoint cleanup, canonical order, double identification |
 | `decomposition` | Internal chord / leaf region binary tree | Three-quarters split, logarithmic depth; rebuilt at the stated cost |
-| `merge` | Separate output map; two fusion passes, witness searches, contractions | Input maps and oracle provenance remain usable; correct stage postconditions |
+| `cap`, `fusion`, `witness`, `merge` | Separate output map; role-aware cap flags, two fusion passes, one-child shielding searches, restoration | Input maps remain immutable; shared-level events select the outgoing germ's region; restoration decreases excess degree |
 | `separator` | Planar face-dual graph, separators, groups, vertical-line lookup | Actual linear-time planar separator; distinct from the submap tree |
-| `oracle` | Saved-chain separator queries; merge adds target-subarc adapters | No whole-arc scan or fresh submap construction hidden inside f/g/h |
+| `oracle`, `arcs`, `program_queries` | Owning saved separator queries; clipped Root and displaced Programme adapters | First raw blocker with tied incidences; descriptor-aware thresholds; no hidden long-arc scan or saved-oracle rebuild |
 | `hierarchy` | Chain grade/index catalog, saved canonical maps and query structures | Queries use strictly smaller processed grades; no per-grade input copies |
-| `refine` | Region-local boundaries including temporary exits | Exit edges protected during merge; filtered chords preserve boundary sides |
+| `view`, `program`, `ribbon`, `collapse`, `graft`, `triangulation` | Lazy region boundaries, symbolic temporary exits, limiting-cut repair, ordered graft and scale controller | Authoritative exits, side/slot provenance, every star transit cut, actual original arc bounds, linear current-map publication |
 | `closure`, `reduction` | Closed-polygon seam reversal and visibility-map conversion | Original-vertex triangle output with no artificial seam/padding vertices |
 | `work` | Counters for predicate calls, scanned arc edges, oracle calls, merge events, decomposition and separator work | Cost attributable to each lemma/grade; timing reported separately |
 
@@ -366,60 +365,91 @@ Double identification can return a fixed-capacity collection of six IDs without
 allocating on every lookup. Choose reclamation and buffer reuse after lifetimes
 are explicit; do not clone full maps merely to avoid borrow conflicts.
 
-**Implemented checkpoint:** `geometry`, `input`, `boundary`, `submap`,
-`decomposition`, `separator`, `oracle`, `hierarchy`, `closure`, and `reduction`
-have executable code. `cap` supplies role-aware common-vertex flags, not the
-complete fusion loop. `base::full_visibility` is a real exhaustive leaf routine
-with a hard, input-independent bound of 16 edges; larger calls return an error.
-The catalogue requires a real `MergeEngine` implementation rather than providing
-a scanning production fallback. General fusion, restoration, symbolic local
-refinement, and the public whole-polygon triangulator remain implementation gates.
+**Public API:** `triangulate(&[Point], &mut Work)` returns
+`Result<Vec<[usize; 3]>, TriangulationError>`. Coordinates are exact rationals;
+`Point::integer(x, y)` is the integer convenience constructor. The implicit closed
+boundary must be a simple polygon with pairwise distinct vertices and no repeated
+closing vertex. Simplicity and global distinctness are caller preconditions, not
+hash-validated. Either winding and consecutive collinear boundary vertices are
+supported. Output uses only caller vertex IDs and nondegenerate CCW triangles.
+
+```rust
+use chazelle_triangulation::{geometry::Point, triangulate, work::Work};
+
+fn main() -> Result<(), chazelle_triangulation::TriangulationError> {
+    let polygon = [Point::integer(0, 0), Point::integer(3, 0), Point::integer(0, 2)];
+    let mut work = Work::default();
+    let triangles = triangulate(&polygon, &mut work)?;
+    println!("{triangles:?}");
+    Ok(())
+}
+```
+
+`OriginalMerge` supplies real saved-chain construction. `base::full_visibility`
+has a hard input-independent bound of 16 edges; it is never an arbitrary-input
+fallback. The final `completion` stage enumerates only conformal regions whose
+actual original arc weights are at most 16. It restores every intrinsic chord:
+granularity one alone is not a full-visibility certificate.
 
 Published normal form compacts outer arenas and each surviving region's nested
 arc/exit vectors. Its IDs expire at republication. Coarse saved maps must not
 retain finer-map tombstone storage or vector capacity.
 
-## 10. Implementation sequence and gates
+Saved normal form includes the balanced query decomposition. Current down-phase
+and final maps use `publish_visibility`: canonical order follows physical endpoint
+links in linear time, and no unused O(n log n) decomposition is built. Ordered
+grafting likewise consumes old-arc endpoint streams without a global sort.
 
-1. **Geometry and boundary specification:** contracts are recorded in
-   [GEOMETRY_BOUNDARY_SPEC.md](GEOMETRY_BOUNDARY_SPEC.md), including exact-rational
-   normalization, companion indexing, routes, and seam/padding. Exercise these
-   rules before mutation code.
-2. **Normal form:** construct small maps, perform augmentation/deletion with
-   endpoint cleanup, compute actual weights, double identification, and balanced
-   decomposition. Prove invariants on empty/null regions as well as ordinary ones.
-3. **Merge with concrete oracle support:** derive the shielding case rules and
-   implement fusion, restoration, and coarsening. A diagnostic scan oracle may
-   validate small examples, but must never be a production fallback or supply a
-   claimed linear bound.
-4. **Separator oracle and saved-chain catalog:** implement the external planar
-   separator prerequisite and close f/g/h using processed smaller grades.
-5. **Up-phase, then down-phase:** exercise the complete saved-structure lifecycle,
-   region-local temporary edges, scale reduction, and operation accounting.
-6. **Polygon output:** implement the external visibility-to-triangulation
-   reduction and remove seam/padding artifacts from original-vertex output.
+## 10. Construction sequence and verification
 
-For eventual behavioral verification, compare small visibility answers against
-independent exhaustive geometric checks. Verify output boundaries, adjacency,
-noncrossing diagonals, coverage, and triangle orientation; for a nondegenerate
-n-vertex polygon require n−2 triangles. Include concave chains, extrema, wrapping
-chords, null regions, double-backing, common-vertex startup, and removable-chord
-cases. Timing alone cannot certify Chazelle's asymptotic guarantee.
+1. **Geometry:** normalize and seam/pad once; derive chain-local occurrences
+   lazily from the shared input.
+2. **Saved maps:** bounded leaves, faithful fusion, cyclic-order witness descent,
+   conformality restoration, actual-weight contraction, compact publication,
+   balanced decomposition and planar-separator preprocessing.
+3. **Up-phase:** build aligned grades; arbitrary intervals use strictly earlier
+   grades and balanced merges, with no input-table copies.
+4. **Down-phase:** move out the root map, compile constant-description local
+   ribbon programmes, query existing smaller saved chains, collapse and repair
+   limiting cuts, graft, restore, and contract at the checked original scale.
+5. **Completion/output:** finish bounded original regions, restore the closed
+   boundary, extract original cap-generator cells, and triangulate mountains.
 
-## 11. Dependency resolution and remaining implementation gates
+Independent exhaustive geometry is confined to bounded leaves and diagnostics.
+Behavioral checks compare first blockers and occurrence identities, then verify
+original-ID output, exact area, CCW orientation, every boundary segment once and
+internal edges twice. Concave chains, collinearity, extrema, full returns, null
+regions, both cap runs, shared-level fusion events, helper-generated remote cuts
+and degree-changing contractions have dedicated regressions.
 
-The primary-paper construction is mapped below; external procedures and derived
-degeneracy rules now have concrete contracts. This does not certify an executable
-whole-polygon Chazelle implementation.
+The down-phase uses the derived bound
+`gamma_next = 2^ceil(ceil(log2(gamma))/5) + 2`: a final original arc inherits one
+temporary support arc and at most one trimmed original edge at each endpoint.
+All star transit cuts and remote equal-base blockers must survive or receive
+independent first-blocker repair. For gamma > 16 this scale strictly decreases.
+The +2 collar allowance is an implementation derivation, not a number printed in
+Chazelle's paper. Section 10 of the geometry specification records its invariant.
 
-| Prerequisite | Source | Resolution / implementation gate |
+`Work` accumulates instrumented predicates, arc-edge visits, retained-record
+visits, oracle calls, fusion events, decomposition visits and separator visits.
+These are algorithmic ledgers, not an instruction count, a coefficient-size
+bound, or a timing-based proof of linearity. Exact big-integer and symbolic
+arithmetic costs remain separate from the paper's geometric-operation model.
+
+## 11. Dependency resolution
+
+The primary-paper construction and its external dependencies are mapped below.
+Derived degeneracy procedures are implemented explicitly rather than delegated
+to numerical epsilons or a different triangulation algorithm.
+
+| Prerequisite | Source | Implemented resolution |
 |---|---|---|
 | Visibility map to triangulation | Paper references [6], [11]: [Chazelle–Incerpi (1984)](https://doi.org/10.1145/357337.357340), [Fournier–Montuno (1984)](https://doi.org/10.1145/357337.357341); [Toma lecture](https://tildesites.bowdoin.edu/~ltoma/teaching/cs3250-CompGeom/spring18/Lectures/cg-polygontriangulation.pdf) | `reduction` joins original cap generators, builds bounded-degree rotations, and triangulates monotone mountains with a strict-turn stack; collinear original vertices remain |
 | Linear-time planar separator | Reference [21]: [Lipton–Tarjan (1979)](https://doi.org/10.1137/0136016), [primary technical report](http://i.stanford.edu/pub/cstr/reports/cs/tr/77/627/CS-TR-77-627.pdf); recursive use [22] | `separator` implements weighted BFS-level contraction and fundamental-cycle shrinking, with internal zero-weight face hubs and disconnected-component handling |
 | Distinct-y input | Geometry/boundary spec §2 | `input` implements exact affine normalization; arithmetic bit costs remain separate; simplicity and pairwise distinctness are caller preconditions, not hash-validated |
-| Boundary and shielding cases | §§2.1, 2.5; startup pp.503–504; search pp.509–510 | `cap` implements separate source/contact role maps and constant-time outgoing-germ region selection; fusion events and cyclic-order shielding still need code |
-| Temporary exit-edge deformation | §4.2 p.519, Fig.4.1; geometry/boundary spec §10 | Derived lazy offsets, ribbon collars, spherical bridges, and level descriptors; remote helper-cap cuts still require a bounded replacement correspondence before arc-bound preservation is established; implement descriptor-aware queries without rebuilding saved chains |
-| Arithmetic domain and storage updates | Geometry and normal form throughout | Exact predicates, actual contraction weights, compact publication, and operation counters are implemented; symbolic local arithmetic remains to implement |
+| Boundary and shielding cases | §§2.1, 2.5; startup pp.503–504; search pp.509–510 | `cap` separates source/contact roles; `fusion` applies outgoing-germ transitions at startup and shared-level endpoint events; `witness` descends one saved child using full-boundary cyclic cuts |
+| Temporary exit-edge deformation | §4.2 p.519, Fig.4.1; geometry/boundary spec §10 | Lazy offsets, clockwise nested collars, finite-only shear and route-preserving projective bridges; descriptor-aware saved queries, directed quotient, exceptional remote-cut repair and checked +2 original arc allowance |
+| Arithmetic domain and storage updates | Geometry and normal form throughout | Rational and hierarchical symbolic exact scalars; normalized Vertex level sources, primitive contact rebasing, actual contraction weights, compact nested storage and linear current-map publication |
 | Closed seam and power-of-two padding | §2.4 p.497; §4 p.516; geometry/boundary spec §8 | `input` pads/seams; `closure` restores original boundary darts and emits complete interior cells with borrowed original points and original cap-generator IDs |
 
 The separator procedure was analyzed from the primary technical report. The
@@ -428,7 +458,7 @@ reduction is corroborated by detailed lecture procedures and published
 [Graphics Gems code](https://raw.githubusercontent.com/erich666/GraphicsGems/master/gemsv/ch7-5/monotone.c),
 not claimed as a line-by-line transcription of those journal articles.
 
-The remaining target is the complete triangulator, not another bounded kernel:
-wire faithful fusion/restoration and saved-chain up-phase, then local symbolic
-down-phase refinement, closure, and original-ID output. Small exhaustive checks
-remain diagnostic/leaf tools, never a general-input production replacement.
+There is no ear-clipping, sweep, scanning-oracle or retry fallback on the public
+path. Component errors propagate with their stage; they are not converted into
+plausible triangles. The implementation remains a source-derived Rust algorithm,
+not a Dafny proof or a claim of linear bit complexity.

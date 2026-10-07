@@ -5,8 +5,8 @@
 //! attach to the direction-preserving outside connector. No epsilon is stored.
 
 use crate::boundary::{Boundary, BoundaryError, Chain, Side, Site, Slot};
-use crate::geometry::orientation;
-use crate::input::VertexId;
+use crate::curve::Curve;
+use crate::input::{Input, VertexId};
 use crate::submap::{MapError, RegionId, Submap};
 use crate::work::Work;
 use std::cmp::Ordering;
@@ -15,8 +15,8 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scope { First, Second }
 impl Scope {
-    fn index(self) -> usize { match self { Self::First => 0, Self::Second => 1 } }
-    fn opposite(self) -> Self { match self { Self::First => Self::Second, Self::Second => Self::First } }
+    pub fn index(self) -> usize { match self { Self::First => 0, Self::Second => 1 } }
+    pub fn opposite(self) -> Self { match self { Self::First => Self::Second, Self::Second => Self::First } }
 }
 #[derive(Debug)]
 pub(crate) enum CapError { Boundary(BoundaryError), Map(MapError), InvalidJoin, InvalidTurn, InvalidCapRegion }
@@ -27,13 +27,16 @@ impl std::error::Error for CapError {}
 impl From<BoundaryError> for CapError { fn from(e: BoundaryError) -> Self { Self::Boundary(e) } }
 impl From<MapError> for CapError { fn from(e: MapError) -> Self { Self::Map(e) } }
 
-#[derive(Clone, Copy)]
-pub(crate) struct Join<'a> {
-    union: Boundary<'a>, scopes: [Boundary<'a>; 2], common: VertexId,
+pub(crate) struct Join<'a, C: Curve = Input> {
+    union: Boundary<'a, C>, scopes: [Boundary<'a, C>; 2], common: VertexId,
     incoming: Ordering, outgoing: Ordering, turn: Ordering,
 }
-impl<'a> Join<'a> {
-    pub fn new(left: &Submap<'a>, right: &Submap<'a>, work: &mut Work) -> Result<Self, CapError> {
+impl<C: Curve> Copy for Join<'_, C> {}
+impl<C: Curve> Clone for Join<'_, C> {
+    fn clone(&self) -> Self { *self }
+}
+impl<'a, C: Curve> Join<'a, C> {
+    pub fn new(left: &Submap<'a, C>, right: &Submap<'a, C>, work: &mut Work) -> Result<Self, CapError> {
         if !std::ptr::eq(left.input(), right.input()) || left.chain().end != right.chain().start {
             return Err(CapError::InvalidJoin);
         }
@@ -43,17 +46,17 @@ impl<'a> Join<'a> {
         let incoming = input.edge_y_sign(crate::input::EdgeId(common.0 - 1));
         let outgoing = input.edge_y_sign(crate::input::EdgeId(common.0));
         work.predicates += 1;
-        let turn = orientation(input.vertex(VertexId(common.0 - 1)), input.vertex(common), input.vertex(VertexId(common.0 + 1)));
+        let turn = input.turn(common);
         if incoming != outgoing && turn == Ordering::Equal { return Err(CapError::InvalidTurn); }
         Ok(Self { union, scopes: [Boundary::new(input, left.chain())?, Boundary::new(input, right.chain())?],
             common, incoming, outgoing, turn })
     }
-    pub fn boundary(self) -> Boundary<'a> { self.union }
-    pub fn scope(self, scope: Scope) -> Boundary<'a> { self.scopes[scope.index()] }
+    pub fn boundary(self) -> Boundary<'a, C> { self.union }
+    pub fn scope(self, scope: Scope) -> Boundary<'a, C> { self.scopes[scope.index()] }
     pub fn common(self) -> VertexId { self.common }
 
     /// Actual source identity. Only the join endpoint changes its slot.
-    pub fn source_site(self, scope: Scope, old: Site) -> Result<Site, CapError> {
+    pub fn source_site(self, scope: Scope, old: Site<C::Scalar>) -> Result<Site<C::Scalar>, CapError> {
         self.scope(scope).validate_site(&old)?;
         if matches!(&old, Site::Vertex { vertex, .. } if *vertex == self.common) {
             Ok(self.union.remap_site(&self.scope(scope), &old)?)
@@ -61,7 +64,7 @@ impl<'a> Join<'a> {
     }
 
     /// Query interpretation of an old endpoint cap, never a null-source remap.
-    pub fn contact_site(self, scope: Scope, old: Site) -> Result<Site, CapError> {
+    pub fn contact_site(self, scope: Scope, old: Site<C::Scalar>) -> Result<Site<C::Scalar>, CapError> {
         let boundary = self.scope(scope);
         boundary.validate_site(&old)?;
         if !matches!(&old, Site::Vertex { vertex, .. } if *vertex == self.common) || self.incoming == self.outgoing {
@@ -73,12 +76,8 @@ impl<'a> Join<'a> {
         Ok(Site::Vertex { vertex: self.common, side, slot })
     }
 
-    pub fn first_source(self, scope: Scope) -> Result<Site, CapError> {
+    pub fn first_source(self, scope: Scope) -> Result<Site<C::Scalar>, CapError> {
         let side = if scope == Scope::First { Side::Right } else { Side::Left };
-        self.source_site(scope, Site::Vertex { vertex: self.common, side, slot: Slot::Single })
-    }
-    pub fn last_source(self, scope: Scope) -> Result<Site, CapError> {
-        let side = if scope == Scope::First { Side::Left } else { Side::Right };
         self.source_site(scope, Site::Vertex { vertex: self.common, side, slot: Slot::Single })
     }
 
@@ -86,7 +85,7 @@ impl<'a> Join<'a> {
     /// Source First departs into -u; source Second departs into w. Both cases
     /// select cap for equal Y signs, Left for positive extreme turn, Right for
     /// negative extreme turn. The target's side labels use forward input edges.
-    pub fn germ_region(self, source: Scope, target: &Submap<'a>) -> Result<RegionId, CapError> {
+    pub fn germ_region(self, source: Scope, target: &Submap<'a, C>) -> Result<RegionId, CapError> {
         let expected = self.scope(source.opposite());
         if !std::ptr::eq(expected.input(), target.input()) || expected.chain() != target.chain() {
             return Err(CapError::InvalidJoin);
@@ -147,9 +146,6 @@ mod tests {
                     if source == Scope::First { arcs[1][0] } else { arcs[1][1] }
                 };
                 assert_eq!(join.germ_region(source, target).unwrap(), target.arc_region(expected).unwrap());
-                let first = join.first_source(source).unwrap();
-                let last = join.last_source(source).unwrap();
-                assert_eq!(join.boundary().direction(&first).unwrap(), join.boundary().direction(&last).unwrap().opposite());
             }
         }}}
     }

@@ -13,7 +13,18 @@ pub enum Node {
         chord: usize,
         left: usize,
         right: usize,
+        /// A descendant region, available without walking the child subtree.
+        representative: usize,
     },
+}
+
+impl Node {
+    pub fn representative(&self) -> usize {
+        match *self {
+            Self::Region(region) => region,
+            Self::Split { representative, .. } => representative,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,7 +241,7 @@ impl Builder<'_> {
         // blocked chords alone delimit components in the immutable input tree.
         let left = self.component(a);
         let right = self.component(b);
-        self.nodes[node] = Node::Split { chord, left, right };
+        self.nodes[node] = Node::Split { chord, left, right, representative: seed };
         node
     }
 }
@@ -258,7 +269,7 @@ mod tests {
                     seen_regions[region] = true;
                     leaf_count[node] = 1;
                 }
-                Node::Split { chord, left, right } => {
+                Node::Split { chord, left, right, .. } => {
                     assert!(!seen_chords[chord]);
                     seen_chords[chord] = true;
                     depth[left] = depth[node] + 1;
@@ -268,7 +279,7 @@ mod tests {
             }
         }
         for &node in traversal.iter().rev() {
-            if let Node::Split { chord, left, right } = decomposition.nodes[node] {
+            if let Node::Split { chord, left, right, representative } = decomposition.nodes[node] {
                 leaf_count[node] = leaf_count[left] + leaf_count[right];
                 let old_edges = leaf_count[node] - 1;
                 assert!(4 * (leaf_count[left] - 1) <= 3 * old_edges);
@@ -285,6 +296,7 @@ mod tests {
                         }
                     }
                 }
+                assert!(left_regions[representative] || right_regions[representative]);
                 let (a, b) = chords[chord];
                 assert!((left_regions[a] && right_regions[b])
                     || (left_regions[b] && right_regions[a]));

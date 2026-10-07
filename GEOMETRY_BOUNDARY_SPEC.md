@@ -1,8 +1,8 @@
 # Geometry and double-boundary specification
 
 This specifies the geometry/boundary layer after [PAPER_MAP.md](PAPER_MAP.md).
-Its rational input and normal-form kernel are implemented in Rust; this is not
-yet a complete triangulator. **Paper facts** are cited to Chazelle's
+Its rational and symbolic curve kernels are used by the complete Rust
+triangulator. **Paper facts** are cited to Chazelle's
 [1991 paper](https://www.cs.princeton.edu/~chazelle/pubs/polygon-triang.pdf);
 **decisions and derivations** below are our implementation choices. Printed pages
 490–491, 493–499, and 516 are the principal sources.
@@ -72,9 +72,9 @@ separate topological device, with no numerical thickening (p.490).
 All subsequent synthetic input vertices are chosen with distinct Y (§8).
 Temporary refinement exit edges are horizontal in this chart. The paper
 symbolically tilts them before merging (p.519, Fig.4.1); the ordinary merge is not
-specified to accept horizontal input edges unchanged. That local deformation,
-its consistent predicates, and its reversal require a separate constructive
-specification before implementing refinement. The global affine transform is
+specified to accept horizontal input edges unchanged. Section 10 gives the
+implemented local deformation, consistent predicates, and limiting-cut reversal.
+The global affine transform is
 not a replacement for it, and must not be reapplied independently to regions
 whose queries use saved maps in the existing chart.
 
@@ -369,7 +369,7 @@ scratch where the chosen numeric library permits; normalize persistent values,
 not every transient comparison by default. Arithmetic scratch is not shared
 across simultaneously active maps without an explicit owner.
 
-The first kernel must support these consumer-visible cases:
+The kernel supports these consumer-visible cases:
 
 - Equal original y and horizontal original edges become a coherent exact strict
   Y-order, without changing orientation or introducing crossings.
@@ -388,61 +388,130 @@ The kernel now executes these transitions with exact rational geometry. The
 closed-map path accepts borrowed original point tables and emits nondegenerate
 CCW original-ID triangles; it does not copy the input geometry into the reducer.
 `base::full_visibility` is restricted to a fixed 16-edge leaf, not a scanning
-fallback for arbitrary curves. Common-vertex source/contact flags are executable,
-but full fusion, shielding, and symbolic down-phase integration remain required.
+fallback for arbitrary curves. Common-vertex source/contact flags, fusion,
+one-child shielding, and region-local symbolic refinement share the same
+`Curve`/`ExactScalar` boundary and sparse topology. The public `triangulate` API
+constructs full visibility before the borrowed closed-cell reduction.
 
 ## 10. Temporary local geometry for down-phase refinement
 
-**Derived contract, not implemented:** the p.519 tilt must support coincident
-caps, repeated opposite-side arcs, null transitions, and exits through horizontal
-infinity without changing or rebuilding saved original-chain maps.
+**Implemented derivation:** `view`, `program`, `ribbon`, `program_queries`,
+`collapse`, `graft`, and `triangulation` realize the p.519 tilt for coincident caps,
+repeated opposite-side arcs, null transitions and exits through horizontal
+infinity. These are explicit bounded-description curve extensions, not a
+line-by-line transcription of the paper's unspecified perturbation.
 
+### 10.1. Directed local boundary
+
+- Traverse the actual old face word with `Submap::arc_successor`, not the stored
+  region vector's incidental order: a clockwise original arc is followed by its
+  exit dart to the mate. The old region lies on this directed word's Left.
 - Give each R-facing side run a lazy normal lane. For forward edge vector d,
-  use N = (−dy, dx)/(|dx| + |dy|) and support p + sδN + td, where s is +1 on
-  Left and −1 on Right. Interior vertices are intersections of adjacent shifted
-  supports; positive collinear continuation uses the shared normal directly.
-  Vertex evaluation uses only its constant-many neighbors.
-- At constant-many junctions, trim branches on a formal rational diamond and
-  route paired lane ports through an inner collar in their inherited ribbon
-  rotation. Nested port intervals get nested collar heights. Straight independent
-  endpoint slides are insufficient: coincident cap ports with the same original
-  germ can produce an overlapping bridge.
-- Apply a common lower-order Y → Y + ηX only to finite supports and collars.
-  Applying that shear across horizontal infinity would give incompatible seam
-  limits. Instead compact U = X/(1 + |X|), interpolate U and Y along an unwrapped
-  route-preserving bridge, and fold at most once at the seam. One seam token
-  identifies both representations of the same crossing.
-- A retained chord needs a normalized common level descriptor: a displaced
-  original-vertex level when inherited from one, or a frozen exact rational
-  level for an arbitrary augmentation. New contacts inherit this descriptor,
-  not a recursively embedded intersection expression. Equal physical
-  subdivisions share their level program.
-- Reevaluate nonintrinsic retained endpoints from their shifted supporting edge
-  and common level. Old rational parameters and old rational Wrap levels are
-  not valid symbolic clipping thresholds. Saved decomposition/separator topology
-  can be reused only with descriptor-aware endpoint and level comparisons.
-- Preserve source occurrence, side/slot, route, and OriginalArc/ProtectedExit/
-  Collar/Bridge/Seam provenance through collapse. Cancel common factors before
-  limits; coordinate deduplication alone cannot distinguish a cap, intrinsic
-  Null, and a full-circle Wrap.
-- Keep authoritative old exits. A discarded helper separator can have a remote
-  original-support contact: the bottom of a start-cap collar for
-  (0,0) → (0,2) → (4,3) → (4,−2) sees x = 4, with limiting contact (4,0).
-  Consequently, locality of the helper's source does **not** imply locality of
-  its other endpoint. Repairing erased intrinsic occurrences alone is not yet
-  an arc-weight proof.
-- Before discarding a separator, require a replacement correspondence: an
-  authoritative protected exit or regenerated original-side separator must
-  preserve each nonlocal original-arc cut, with the correct side/slot and route.
-  Coincident blockers may require partitioning its limiting route into legal
-  original visibility intervals; merely checking its two endpoint labels is
-  insufficient. A bounded replacement-chain argument is still a proof gate,
-  including augmentations whose level coincides with an original vertex.
-- Restore conformality **after** quotient/filtering and those replacements.
-  Conformality alone cannot fix an oversized arc in a region with at most four
-  exits. Publish only after actual original positive-length arc weights satisfy
-  the refinement scale; a full-chain scan is not an admissible repair.
-- Each local program has constant-many symbolic priorities and bounded
-  expression depth; it is discarded after collapse. Saved geometry is neither
-  scanned nor copied. These are constraints on the intended geometric-operation
-  ledger, not an implemented refinement or a linear big-integer bit-cost bound.
+  use N = (−dy, dx)/(|dx| + |dy|) and support p + sδN + td, with positive width
+  on Left and negative width on Right. Genuine-turn vertices are intersections
+  of shifted supports; positive collinear continuation shares one normal.
+  Evaluation uses only constant-many Root neighbors, never a copied chain.
+- Physical stars include exit endpoints, relevant caps and **every opposite-side
+  R-facing transit at the same point**, including edge-interior occurrences.
+  Preserve their original Side/Slot/germ labels separately from coordinates.
+- Trim on disjoint formal rational diamonds. Each trimmed original branch stays
+  on its known incident Root edge; positive-length stubs remain Original aliases.
+  No other Root vertex lies in such an infinitesimal collar.
+- Connect incoming to outgoing ports clockwise in the inherited R-sector:
+  short convex, long reflex, or nearly full same-germ cap. Noninterleaving port
+  intervals are disjoint or nested; containing intervals receive deeper collars.
+  Split at diamond corners. Straight independent endpoint slides can overlap
+  same-germ cap branches and are not used.
+- These selected Left-side aliases and collar sector tokens form a monotone,
+  directed quotient onto the old region boundary word. Open the programme only
+  by puncturing a constant-size helper piece, never a positive original alias.
+
+### 10.2. Finite chart, wrapping bridges and source levels
+
+- Apply the common lower-order Y → Y + ηX to finite supports and collars only.
+  An unbounded affine shear at horizontal infinity has incompatible seam limits.
+- Compact with U = X/(1 + |X|). A protected Wrap bridge interpolates U and Y on
+  its proper unwrapped interval, folds at most once, and keeps a shared seam
+  token. A pre-seam auxiliary vertex separates its seam level from vertex levels.
+  Equal-coordinate full returns retain distinct terminal occurrence roles.
+- `Symbolic` is an exact rational-function field with 128 hierarchical positive
+  infinitesimals. Coefficients and polynomials share storage; normal exponents
+  are inline, with arbitrary-precision promotion on overflow. Sign and equality
+  use algebraic values, never variable IDs as geometric tie breakers.
+- A retained chord carries `LevelSource::Vertex` or `Frozen`. The generic kernel
+  supports arbitrary certified frozen augmentations. Production refinement
+  requires normalized Vertex sources: bounded leaves use actual Programme
+  vertices, fusion inherits/promotes sources, and witnesses preserve them.
+  `Ribbon::root_source` maps each source arithmetically to its Root base vertex.
+- Reevaluate symbolic Edge contacts from the supporting primitive and that
+  actual source level before further fusion. Old rational parameters and old
+  Wrap levels are not displaced clipping thresholds; saved probes compare
+  reevaluated endpoints and source levels without rebuilding saved topology.
+  This prevents recursive Contact(Contact) expressions across merge depth.
+- Alias/helper primitives have bounded description and algebraic depth. Every
+  local programme disappears after collapse; exact coefficient/bit costs are
+  not asserted to be constant.
+
+### 10.3. Exceptional limiting cuts
+
+A helper's geometry may be local while its visibility contact is remote: the
+bottom of the start-cap collar for (0,0) → (0,2) → (4,3) → (4,−2) sees x = 4,
+with limiting contact (4,0). Discarding helper chords and repairing only erased
+intrinsic vertices would lose that remote original-arc cut.
+
+`collapse` instead:
+
+1. Retains authoritative old exits and their occurrence/source/route identities.
+2. Keeps ordinary legal Original2 limits using the directed quotient, exact
+   support residues, and Side/Slot normalization—not coordinate deduplication.
+3. Includes the actual Root Vertex(q) source of each old exit in its exceptional
+   packet, even if q is remote and neither exit endpoint is intrinsic.
+4. Queues each original endpoint of a discarded helper-incident or exceptional
+   invalid limiting chord, and **all original star transit occurrences**.
+5. Repairs each cut independently in its actual Root direction. Inside Nulls
+   resolve immediately; occupied authoritative exits keep their partners.
+   Otherwise query at most four immutable old R-arcs, retain the first raw
+   physical blocker and all tied flags, and select the correct outside arrival.
+   Never skip a wrong-sector nearest blocker to return a farther contact.
+6. Deduplicates by actual endpoint identities and route, rejecting conflicting
+   mates. Per-old-arc streams retain transported cut order; only constant-size
+   repair additions are sorted. Identical repaired endpoint references occur
+   once; distinct duplicate-pair rows retain the ordered builder's coverage.
+7. Grafts through linear cyclic assembly, then restores conformality and
+   contracts using actual Root arc weights.
+
+Independent repair starts in the old R-facing germ. Its horizontal prefix cannot
+cross a horizontal protected exit transversely; the first collinear entry is an
+original endpoint and thus a blocker. It stays in the named old region until the
+first original contact. There is no need to continue a limiting route through
+an occupied or opposite-side occurrence to connect its former two endpoints.
+
+The expensive repairs are bounded by constant-many stars, helper pieces and
+exceptional actual levels. At one exact level retained positive visibility
+intervals have disjoint interiors, so only constant-many can contain a fixed
+exceptional blocker/germ. This does **not** assume a bounded number of chords per
+Vertex source class. Ordinary retained endpoints receive no repair query.
+
+### 10.4. Original arc bound and publication
+
+Every selected original cut survives as a kept chord, protected exit or repaired
+cut at the same original occurrence. Every R-facing star transit is also a cut.
+Consequently a final positive Root arc has no star internally, and its directed
+core lies in one temporary predecessor support arc. Alias projection preserves
+Side and injects those Root edge visits into temporary support-edge visits.
+Only the two endpoint collars can add an unrepresented trimmed Root edge:
+
+`weight_Root <= weight_temporary_support + 2`.
+
+Restoration adds cuts and cannot increase this bound. The controller checks it
+before contracting at `gamma_next = canonical_gamma(gamma) + 2`, where
+`canonical_gamma(gamma) = 2^ceil(ceil(log2(gamma))/5)`. This strictly decreases
+for gamma > 16. At the fixed cutoff, `completion` reconstructs every original
+intrinsic visibility chord by bounded region enumeration; gamma = 1 alone does
+not guarantee full visibility.
+
+Saved maps retain query decompositions. Current/final visibility publication
+follows physical endpoint links to canonical order in linear time, compacts all
+nested capacities, and does not build an unused balanced decomposition. These
+are source-derived implementation invariants, not a machine-checked proof or
+a linear big-integer bit-cost claim.

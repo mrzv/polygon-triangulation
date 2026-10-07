@@ -5,8 +5,9 @@
 //! its nearest admissible contact, including null and full-circle routes.
 
 use crate::boundary::{Boundary, BoundaryError, Direction, Side, Site};
-use crate::geometry::{Rational, Route, contact_route, horizontal_hit, ray_order};
-use crate::input::{EdgeId, VertexId};
+use crate::curve::Curve;
+use crate::geometry::{Route, contact_route, ray_order};
+use crate::input::EdgeId;
 use crate::submap::{MapError, Submap, VisibleChord};
 use crate::work::Work;
 use std::cmp::Ordering;
@@ -34,11 +35,11 @@ impl From<MapError> for BaseError {
     fn from(error: MapError) -> Self { Self::Map(error) }
 }
 
-pub fn full_visibility<'a>(boundary: Boundary<'a>, work: &mut Work) -> Result<Submap<'a>, BaseError> {
+pub fn full_visibility<'a, C: Curve>(boundary: Boundary<'a, C>, work: &mut Work) -> Result<Submap<'a, C>, BaseError> {
     let chain = boundary.chain();
     let edges = chain.end.0 - chain.start.0;
-    if edges > MAX_BASE_EDGES { return Err(BaseError::TooLarge { edges }); }
-    let mut chords: Vec<VisibleChord> = Vec::with_capacity(2 * (edges + 1));
+    if edges > C::MAX_LEAF_EDGES { return Err(BaseError::TooLarge { edges }); }
+    let mut chords: Vec<VisibleChord<C::Scalar>> = Vec::with_capacity(2 * (edges + 1));
     for source in boundary.occurrences() {
         work.predicates += 1;
         let (target, route) = if boundary.inside_null_pair(&source)? {
@@ -47,16 +48,14 @@ pub fn full_visibility<'a>(boundary: Boundary<'a>, work: &mut Work) -> Result<Su
             let Site::Vertex { vertex, .. } = source else { unreachable!() };
             let point = boundary.input().vertex(vertex);
             let direction = boundary.direction(&source)?;
-            let mut closest: Option<Rational> = None;
-            let mut arrival: Option<Site> = None;
+            let mut closest: Option<C::Scalar> = None;
+            let mut arrival: Option<Site<C::Scalar>> = None;
             let mut ambiguous = false;
             for index in chain.start.0..chain.end.0 {
                 let edge = EdgeId(index);
                 work.arc_edge_visits += 1;
-                let a = boundary.input().vertex(VertexId(index));
-                let b = boundary.input().vertex(VertexId(index + 1));
                 work.predicates += 1;
-                let Some((t, x)) = horizontal_hit(a, b, &point.y) else { continue; };
+                let Some((t, x)) = boundary.input().horizontal_hit(edge, &point.y) else { continue; };
                 let order = closest.as_ref().map_or(Ordering::Less, |old| {
                     work.predicates += 1;
                     ray_order(&point.x, direction, &x, old)
@@ -98,7 +97,11 @@ pub fn full_visibility<'a>(boundary: Boundary<'a>, work: &mut Work) -> Result<Su
                 return Err(BaseError::ConflictingPartner);
             }
         }
-        if !duplicate { chords.push(VisibleChord { endpoints: [source, target], route }); }
+        if !duplicate {
+            let Site::Vertex { vertex, .. } = &source else { unreachable!() };
+            let level = crate::curve::LevelSource::Vertex(*vertex);
+            chords.push(VisibleChord { endpoints: [source, target], route, level });
+        }
     }
     let map = Submap::from_verified_chords(&boundary, chords, work)?;
     if map.decomposition().is_none() { return Err(BaseError::Map(MapError::NonConformal)); }
@@ -109,8 +112,8 @@ pub fn full_visibility<'a>(boundary: Boundary<'a>, work: &mut Work) -> Result<Su
 mod tests {
     use super::*;
     use crate::boundary::{Chain, Slot};
-    use crate::geometry::Point;
-    use crate::input::Input;
+    use crate::geometry::{Point, Rational};
+    use crate::input::{Input, VertexId};
 
     #[test]
     fn finite_blocker_and_opposite_wrapping_partner_are_not_conflated() {

@@ -1,10 +1,12 @@
 //! Curve-local double boundary without an occurrence table. Clockwise order is
 //! Left forward, end cap, Right backward, start cap. Arcs borrow their endpoints;
 //! their positive edge pieces are described by at most three lazy side runs.
-use crate::geometry::{Point, Rational, contact_route, horizontal_hit, orientation, ray_order};
+use crate::geometry::{Point, Rational, contact_route, ray_order};
 pub use crate::geometry::{Direction, Route};
 use crate::input::{EdgeId, Input, VertexId};
-use num_traits::{One, Zero};
+use crate::curve::Curve;
+use crate::scalar::ExactScalar;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -14,18 +16,18 @@ impl Side { pub fn opposite(self) -> Self { match self { Self::Left => Self::Rig
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Slot { Single, Incoming, Outgoing }
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Site {
+pub enum Site<S = Rational> {
     Vertex { vertex: VertexId, side: Side, slot: Slot },
-    Edge { edge: EdgeId, t: Rational, side: Side },
+    Edge { edge: EdgeId, t: S, side: Side },
 }
-impl Site {
+impl<S> Site<S> {
     pub fn side(&self) -> Side { match self { Self::Vertex { side, .. } | Self::Edge { side, .. } => *side } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Chain { pub start: VertexId, pub end: VertexId }
 impl Chain {
-    pub fn new(input: &Input, start: VertexId, end: VertexId) -> Result<Self, BoundaryError> {
+    pub fn new<C: Curve>(input: &C, start: VertexId, end: VertexId) -> Result<Self, BoundaryError> {
         if start.0 >= end.0 || end.0 >= input.len() { return Err(BoundaryError::InvalidChain); }
         Ok(Self { start, end })
     }
@@ -48,17 +50,21 @@ impl fmt::Display for BoundaryError {
 }
 impl std::error::Error for BoundaryError {}
 
-#[derive(Clone, Copy, Debug)]
-pub struct Boundary<'a> { input: &'a Input, chain: Chain }
+#[derive(Debug)]
+pub struct Boundary<'a, C: Curve = Input> { input: &'a C, chain: Chain }
+impl<C: Curve> Copy for Boundary<'_, C> {}
+impl<C: Curve> Clone for Boundary<'_, C> { fn clone(&self) -> Self { *self } }
 
 /// Exact point in forward input order; edge parameters remain forward on Right.
-#[derive(Clone, Copy, Debug)]
-pub enum Position<'s> { Vertex(VertexId), Edge { edge: EdgeId, t: &'s Rational } }
-impl<'s> Position<'s> {
-    fn of(site: &'s Site) -> Self {
+#[derive(Debug)]
+pub enum Position<'s, S = Rational> { Vertex(VertexId), Edge { edge: EdgeId, t: &'s S } }
+impl<S> Copy for Position<'_, S> {}
+impl<S> Clone for Position<'_, S> { fn clone(&self) -> Self { *self } }
+impl<'s, S: ExactScalar> Position<'s, S> {
+    fn of(site: &'s Site<S>) -> Self {
         match site { Site::Vertex { vertex, .. } => Self::Vertex(*vertex), Site::Edge { edge, t, .. } => Self::Edge { edge: *edge, t } }
     }
-    fn compare(self, other: Position<'_>) -> Ordering {
+    fn compare(self, other: Position<'_, S>) -> Ordering {
         match (self, other) {
             (Position::Vertex(a), Position::Vertex(b)) => a.cmp(&b),
             (Position::Vertex(a), Position::Edge { edge, .. }) => if a.0 <= edge.0 { Ordering::Less } else { Ordering::Greater },
@@ -70,11 +76,15 @@ impl<'s> Position<'s> {
     fn last_edge(self) -> usize { match self { Self::Vertex(v) => v.0 - 1, Self::Edge { edge, .. } => edge.0 } }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Arc<'s> { pub start: &'s Site, pub end: &'s Site, pub full_circuit: bool }
-#[derive(Clone, Copy, Debug)]
-pub struct SideRun<'s> { pub side: Side, pub from: Position<'s>, pub to: Position<'s> }
-impl<'s> SideRun<'s> {
+#[derive(Debug)]
+pub struct Arc<'s, S = Rational> { pub start: &'s Site<S>, pub end: &'s Site<S>, pub full_circuit: bool }
+impl<S> Copy for Arc<'_, S> {}
+impl<S> Clone for Arc<'_, S> { fn clone(&self) -> Self { *self } }
+#[derive(Debug)]
+pub struct SideRun<'s, S = Rational> { pub side: Side, pub from: Position<'s, S>, pub to: Position<'s, S> }
+impl<S> Copy for SideRun<'_, S> {}
+impl<S> Clone for SideRun<'_, S> { fn clone(&self) -> Self { *self } }
+impl<'s, S: ExactScalar> SideRun<'s, S> {
     pub fn weight(self) -> usize {
         let (low, high) = if self.side == Side::Left { (self.from, self.to) } else { (self.to, self.from) };
         if low.compare(high) == Ordering::Equal { return 0; }
@@ -90,24 +100,24 @@ impl<'s> SideRun<'s> {
     }
     /// Owned closed clipping bounds. None means this edge has no
     /// positive-length piece in the run.
-    pub fn clipped_interval(self, edge: EdgeId) -> Option<(Rational, Rational)> {
+    pub fn clipped_interval(self, edge: EdgeId) -> Option<(S, S)> {
         if self.weight() == 0 { return None; }
         let (low, high) = if self.side == Side::Left { (self.from, self.to) } else { (self.to, self.from) };
         if edge.0 < low.first_edge() || edge.0 > high.last_edge() { return None; }
-        let lo = match low { Position::Edge { edge: e, t } if e == edge => t.clone(), _ => Rational::zero() };
-        let hi = match high { Position::Edge { edge: e, t } if e == edge => t.clone(), _ => Rational::one() };
+        let lo = match low { Position::Edge { edge: e, t } if e == edge => t.clone(), _ => S::zero_value() };
+        let hi = match high { Position::Edge { edge: e, t } if e == edge => t.clone(), _ => S::one_value() };
         Some((lo, hi))
     }
-    pub fn contains_parameter(self, edge: EdgeId, t: &Rational) -> bool {
+    pub fn contains_parameter(self, edge: EdgeId, t: &S) -> bool {
         let position = Position::Edge { edge, t };
         let (low, high) = if self.side == Side::Left { (self.from, self.to) } else { (self.to, self.from) };
         low.compare(position) != Ordering::Greater && position.compare(high) != Ordering::Greater
     }
 }
 
-pub struct SideRuns<'s> { runs: [Option<SideRun<'s>>; 3], index: usize }
-impl<'s> Iterator for SideRuns<'s> {
-    type Item = SideRun<'s>;
+pub struct SideRuns<'s, S = Rational> { runs: [Option<SideRun<'s, S>>; 3], index: usize }
+impl<'s, S: ExactScalar> Iterator for SideRuns<'s, S> {
+    type Item = SideRun<'s, S>;
     fn next(&mut self) -> Option<Self::Item> {
         while self.index < 3 {
             let result = self.runs[self.index]; self.index += 1;
@@ -117,22 +127,22 @@ impl<'s> Iterator for SideRuns<'s> {
     }
 }
 
-impl<'a> Boundary<'a> {
-    pub fn new(input: &'a Input, chain: Chain) -> Result<Self, BoundaryError> {
+impl<'a, C: Curve> Boundary<'a, C> {
+    pub fn new(input: &'a C, chain: Chain) -> Result<Self, BoundaryError> {
         Chain::new(input, chain.start, chain.end)?;
         Ok(Self { input, chain })
     }
-    pub fn input(&self) -> &'a Input { self.input }
+    pub fn input(&self) -> &'a C { self.input }
     pub fn chain(&self) -> Chain { self.chain }
     pub fn is_extremum(&self, vertex: VertexId) -> bool {
         vertex.0 > self.chain.start.0 && vertex.0 < self.chain.end.0
             && self.input.edge_y_sign(EdgeId(vertex.0 - 1)) != self.input.edge_y_sign(EdgeId(vertex.0))
     }
-    fn vertex_site(&self, vertex: VertexId, side: Side, incoming: bool) -> Site {
+    fn vertex_site(&self, vertex: VertexId, side: Side, incoming: bool) -> Site<C::Scalar> {
         let slot = if self.is_extremum(vertex) { if incoming { Slot::Incoming } else { Slot::Outgoing } } else { Slot::Single };
         Site::Vertex { vertex, side, slot }
     }
-    pub fn normalize_site(&self, site: &Site) -> Result<Site, BoundaryError> {
+    pub fn normalize_site(&self, site: &Site<C::Scalar>) -> Result<Site<C::Scalar>, BoundaryError> {
         match site {
             Site::Vertex { vertex, slot, .. } => {
                 if vertex.0 < self.chain.start.0 || vertex.0 > self.chain.end.0 { return Err(BoundaryError::OutsideChain); }
@@ -142,15 +152,15 @@ impl<'a> Boundary<'a> {
             }
             Site::Edge { edge, t, side } => {
                 if edge.0 < self.chain.start.0 || edge.0 >= self.chain.end.0 { return Err(BoundaryError::OutsideChain); }
-                if t < &Rational::zero() || t > &Rational::one() { return Err(BoundaryError::InvalidParameter); }
-                if t.is_zero() { Ok(self.vertex_site(VertexId(edge.0), *side, false)) }
-                else if t.is_one() { Ok(self.vertex_site(VertexId(edge.0 + 1), *side, true)) }
+                if t < &C::Scalar::zero_value() || t > &C::Scalar::one_value() { return Err(BoundaryError::InvalidParameter); }
+                if t.is_zero_value() { Ok(self.vertex_site(VertexId(edge.0), *side, false)) }
+                else if t.compare_one() == Ordering::Equal { Ok(self.vertex_site(VertexId(edge.0 + 1), *side, true)) }
                 else { Ok(site.clone()) }
             }
         }
     }
     /// Validate an already canonical persistent identity, without cloning it.
-    pub fn validate_site(&self, site: &Site) -> Result<(), BoundaryError> {
+    pub fn validate_site(&self, site: &Site<C::Scalar>) -> Result<(), BoundaryError> {
         match site {
             Site::Vertex { vertex, slot, .. } => {
                 if vertex.0 < self.chain.start.0 || vertex.0 > self.chain.end.0 { return Err(BoundaryError::OutsideChain); }
@@ -158,31 +168,29 @@ impl<'a> Boundary<'a> {
             }
             Site::Edge { edge, t, .. } => {
                 if edge.0 < self.chain.start.0 || edge.0 >= self.chain.end.0 { return Err(BoundaryError::OutsideChain); }
-                if t <= &Rational::zero() || t >= &Rational::one() { return Err(BoundaryError::NoncanonicalSite); }
+                if t <= &C::Scalar::zero_value() || t >= &C::Scalar::one_value() { return Err(BoundaryError::NoncanonicalSite); }
             }
         }
         Ok(())
     }
-    pub fn point(&self, site: &Site) -> Result<Point, BoundaryError> {
+    /// Intrinsic coordinates stay borrowed; computed contacts use actual curve geometry.
+    pub fn point(&self, site: &Site<C::Scalar>) -> Result<Cow<'a, Point<C::Scalar>>, BoundaryError> {
         self.validate_site(site)?;
         Ok(match site {
-            Site::Vertex { vertex, .. } => self.input.vertex(*vertex).clone(),
-            Site::Edge { edge, t, .. } => {
-                let a = self.input.vertex(VertexId(edge.0)); let b = self.input.vertex(VertexId(edge.0 + 1));
-                Point::new(&a.x + t * (&b.x - &a.x), &a.y + t * (&b.y - &a.y))
-            }
+            Site::Vertex { vertex, .. } => self.input.vertex(*vertex),
+            Site::Edge { edge, t, .. } => Cow::Owned(self.input.edge_point(*edge, t)),
         })
     }
     /// Sites must already be validated for this curve scope.
-    pub fn compare_sites(&self, a: &Site, b: &Site) -> Ordering {
+    pub fn compare_sites(&self, a: &Site<C::Scalar>, b: &Site<C::Scalar>) -> Ordering {
         if a.side() != b.side() { return if a.side() == Side::Left { Ordering::Less } else { Ordering::Greater }; }
         let order = Position::of(a).compare(Position::of(b)).then_with(|| {
-            fn rank(site: &Site) -> u8 { match site { Site::Vertex { slot: Slot::Incoming, .. } => 0, Site::Vertex { slot: Slot::Outgoing, .. } => 2, _ => 1 } }
+            fn rank<S>(site: &Site<S>) -> u8 { match site { Site::Vertex { slot: Slot::Incoming, .. } => 0, Site::Vertex { slot: Slot::Outgoing, .. } => 2, _ => 1 } }
             rank(a).cmp(&rank(b))
         });
         if a.side() == Side::Left { order } else { order.reverse() }
     }
-    pub fn companion(&self, site: &Site) -> Result<Option<Site>, BoundaryError> {
+    pub fn companion(&self, site: &Site<C::Scalar>) -> Result<Option<Site<C::Scalar>>, BoundaryError> {
         self.validate_site(site)?;
         Ok(match site {
             Site::Edge { .. } => None,
@@ -192,7 +200,7 @@ impl<'a> Boundary<'a> {
             }),
         })
     }
-    pub fn direction(&self, site: &Site) -> Result<Direction, BoundaryError> {
+    pub fn direction(&self, site: &Site<C::Scalar>) -> Result<Direction, BoundaryError> {
         self.validate_site(site)?;
         let edge = match site {
             Site::Edge { edge, .. } => *edge,
@@ -201,20 +209,20 @@ impl<'a> Boundary<'a> {
         let rises = self.input.edge_y_sign(edge) == Ordering::Greater;
         Ok(if rises == (site.side() == Side::Left) { Direction::Left } else { Direction::Right })
     }
-    pub fn inside_null_pair(&self, site: &Site) -> Result<bool, BoundaryError> {
+    pub fn inside_null_pair(&self, site: &Site<C::Scalar>) -> Result<bool, BoundaryError> {
         self.validate_site(site)?;
         let Site::Vertex { vertex, side, .. } = site else { return Ok(false); };
         if !self.is_extremum(*vertex) { return Ok(false); }
-        let turn = orientation(self.input.vertex(VertexId(vertex.0 - 1)), self.input.vertex(*vertex), self.input.vertex(VertexId(vertex.0 + 1)));
+        let turn = self.input.turn(*vertex);
         Ok(match turn { Ordering::Greater => *side == Side::Left, Ordering::Less => *side == Side::Right,
             Ordering::Equal => unreachable!("simple input excludes a collinear extremum") })
     }
-    pub fn null_contact(&self, site: &Site) -> Result<Option<Site>, BoundaryError> {
+    pub fn null_contact(&self, site: &Site<C::Scalar>) -> Result<Option<Site<C::Scalar>>, BoundaryError> {
         if self.inside_null_pair(site)? { self.companion(site) } else { Ok(None) }
     }
     /// Scope remapping for a join. Endpoint slots acquire the union's incidence;
     /// this does not decide whether a chord survives fusion.
-    pub fn remap_site(&self, source: &Boundary<'_>, site: &Site) -> Result<Site, BoundaryError> {
+    pub fn remap_site(&self, source: &Boundary<'_, C>, site: &Site<C::Scalar>) -> Result<Site<C::Scalar>, BoundaryError> {
         if !std::ptr::eq(self.input, source.input) { return Err(BoundaryError::DifferentInput); }
         source.validate_site(site)?;
         match site {
@@ -229,17 +237,17 @@ impl<'a> Boundary<'a> {
             Site::Edge { .. } => self.normalize_site(site),
         }
     }
-    pub fn arc<'s>(&self, start: &'s Site, end: &'s Site, full_circuit: bool) -> Result<Arc<'s>, BoundaryError> {
+    pub fn arc<'s>(&self, start: &'s Site<C::Scalar>, end: &'s Site<C::Scalar>, full_circuit: bool) -> Result<Arc<'s, C::Scalar>, BoundaryError> {
         self.validate_site(start)?; self.validate_site(end)?;
         if full_circuit && start != end { return Err(BoundaryError::InvalidFullCircuit); }
         Ok(Arc { start, end, full_circuit })
     }
-    pub fn arc_weight(&self, start: &Site, end: &Site, full: bool) -> Result<usize, BoundaryError> {
+    pub fn arc_weight(&self, start: &Site<C::Scalar>, end: &Site<C::Scalar>, full: bool) -> Result<usize, BoundaryError> {
         let arc = self.arc(start, end, full)?;
         Ok(self.runs(&arc).map(SideRun::weight).sum())
     }
     /// Constant-size index arithmetic; no scan over supporting input edges.
-    pub fn runs<'s>(&self, arc: &Arc<'s>) -> SideRuns<'s> {
+    pub fn runs<'s>(&self, arc: &Arc<'s, C::Scalar>) -> SideRuns<'s, C::Scalar> {
         let mut runs = [None; 3];
         if arc.start == arc.end && !arc.full_circuit { return SideRuns { runs, index: 0 }; }
         let side = arc.start.side(); let from = Position::of(arc.start); let to = Position::of(arc.end);
@@ -259,14 +267,14 @@ impl<'a> Boundary<'a> {
         }
         SideRuns { runs, index: 0 }
     }
-    pub fn contains_site(&self, arc: &Arc<'_>, site: &Site) -> bool {
+    pub fn contains_site(&self, arc: &Arc<'_, C::Scalar>, site: &Site<C::Scalar>) -> bool {
         if arc.full_circuit { return true; }
         if arc.start == arc.end { return false; }
         let from = self.compare_sites(arc.start, site) != Ordering::Greater;
         let to = self.compare_sites(site, arc.end) != Ordering::Greater;
         if self.compare_sites(arc.start, arc.end) == Ordering::Less { from && to } else { from || to }
     }
-    fn successor(&self, site: &Site) -> Site {
+    fn successor(&self, site: &Site<C::Scalar>) -> Site<C::Scalar> {
         let Site::Vertex { vertex, side, slot } = site else { unreachable!("successor operates on intrinsic sites") };
         match side {
             Side::Left if *slot == Slot::Incoming => self.vertex_site(*vertex, *side, false),
@@ -277,11 +285,11 @@ impl<'a> Boundary<'a> {
             Side::Right => self.vertex_site(VertexId(vertex.0 - 1), *side, false),
         }
     }
-    pub fn occurrences(&self) -> Occurrences<'a> {
+    pub fn occurrences(&self) -> Occurrences<'a, C> {
         let first = self.vertex_site(self.chain.start, Side::Left, false);
         Occurrences { boundary: *self, next: Some(first.clone()), first }
     }
-    pub fn arc_occurrences<'b, 's>(&'b self, arc: &'b Arc<'s>) -> ArcOccurrences<'a, 'b, 's> {
+    pub fn arc_occurrences<'b, 's>(&'b self, arc: &'b Arc<'s, C::Scalar>) -> ArcOccurrences<'a, 'b, 's, C> {
         let first = match arc.start {
             Site::Vertex { .. } => arc.start.clone(),
             Site::Edge { edge, side, .. } => self.vertex_site(VertexId(if *side == Side::Left { edge.0 + 1 } else { edge.0 }), *side, *side == Side::Left),
@@ -289,7 +297,7 @@ impl<'a> Boundary<'a> {
         let next = if self.contains_site(arc, &first) { Some(first.clone()) } else { None };
         ArcOccurrences { boundary: *self, arc, next, first }
     }
-    pub fn validate_route(&self, start: &Site, end: &Site, direction: Direction, route: Route) -> Result<(), BoundaryError> {
+    pub fn validate_route(&self, start: &Site<C::Scalar>, end: &Site<C::Scalar>, direction: Direction, route: Route) -> Result<(), BoundaryError> {
         self.validate_site(start)?; self.validate_site(end)?;
         if start == end { return Err(BoundaryError::InvalidRoute); }
         let a = self.point(start)?; let b = self.point(end)?;
@@ -301,25 +309,25 @@ impl<'a> Boundary<'a> {
         };
         if valid { Ok(()) } else { Err(BoundaryError::InvalidRoute) }
     }
-    pub fn contact_faces_ray(&self, site: &Site, direction: Direction) -> Result<bool, BoundaryError> {
+    pub fn contact_faces_ray(&self, site: &Site<C::Scalar>, direction: Direction) -> Result<bool, BoundaryError> {
         Ok(self.direction(site)? == direction.opposite())
     }
 }
 
-pub struct Occurrences<'a> { boundary: Boundary<'a>, next: Option<Site>, first: Site }
-impl Iterator for Occurrences<'_> {
-    type Item = Site;
-    fn next(&mut self) -> Option<Site> {
+pub struct Occurrences<'a, C: Curve = Input> { boundary: Boundary<'a, C>, next: Option<Site<C::Scalar>>, first: Site<C::Scalar> }
+impl<C: Curve> Iterator for Occurrences<'_, C> {
+    type Item = Site<C::Scalar>;
+    fn next(&mut self) -> Option<Self::Item> {
         let site = self.next.take()?;
         let successor = self.boundary.successor(&site);
         if successor != self.first { self.next = Some(successor); }
         Some(site)
     }
 }
-pub struct ArcOccurrences<'a, 'b, 's> { boundary: Boundary<'a>, arc: &'b Arc<'s>, next: Option<Site>, first: Site }
-impl Iterator for ArcOccurrences<'_, '_, '_> {
-    type Item = Site;
-    fn next(&mut self) -> Option<Site> {
+pub struct ArcOccurrences<'a, 'b, 's, C: Curve = Input> { boundary: Boundary<'a, C>, arc: &'b Arc<'s, C::Scalar>, next: Option<Site<C::Scalar>>, first: Site<C::Scalar> }
+impl<C: Curve> Iterator for ArcOccurrences<'_, '_, '_, C> {
+    type Item = Site<C::Scalar>;
+    fn next(&mut self) -> Option<Self::Item> {
         let site = self.next.take()?;
         if !self.arc.full_circuit && &site == self.arc.end { return Some(site); }
         let successor = self.boundary.successor(&site);
@@ -329,27 +337,27 @@ impl Iterator for ArcOccurrences<'_, '_, '_> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Contact { pub site: Site, pub x: Rational }
+pub struct Contact<S = Rational> { pub site: Site<S>, pub x: S }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Chord {
-    pub start: Site,
-    pub end: Site,
+pub struct Chord<S = Rational> {
+    pub start: Site<S>,
+    pub end: Site<S>,
     pub direction: Direction,
     pub route: Route,
 }
-impl Chord {
+impl<S: Clone> Chord<S> {
     pub fn reversed(&self) -> Self {
         Self { start: self.end.clone(), end: self.start.clone(),
             direction: self.direction.opposite(), route: self.route }
     }
 }
 
-impl<'a> Boundary<'a> {
+impl<'a, C: Curve> Boundary<'a, C> {
     /// All exact contacts on a clipped arc. Intrinsic occurrences are emitted
     /// first, followed by interior-edge contacts in run order. This is not a
     /// visibility decision and makes no assumption about arrival sectors.
-    pub fn hits<'b, 's, 'l>(&'b self, arc: &'b Arc<'s>, level: &'l Rational) -> Hits<'a, 'b, 's, 'l> {
+    pub fn hits<'b, 's, 'l>(&'b self, arc: &'b Arc<'s, C::Scalar>, level: &'l C::Scalar) -> Hits<'a, 'b, 's, 'l, C> {
         Hits { boundary: *self, arc, level, occurrences: self.arc_occurrences(arc),
             runs: self.runs(arc), active_run: None, next_edge: None, seen_start: false }
     }
@@ -358,10 +366,10 @@ impl<'a> Boundary<'a> {
     /// inadmissible arrival must not be skipped to obtain a farther contact.
     /// Resolve `null_contact` before invoking this nonnull ray operation.
     pub fn nearest_contacts<'b, 's>(
-        &'b self, arc: &'b Arc<'s>, source: &Site, direction: Direction,
-    ) -> Result<Option<NearestContacts<'a, 'b, 's>>, BoundaryError> {
+        &'b self, arc: &'b Arc<'s, C::Scalar>, source: &Site<C::Scalar>, direction: Direction,
+    ) -> Result<Option<NearestContacts<'a, 'b, 's, C>>, BoundaryError> {
         let point = self.point(source)?;
-        let mut best: Option<Rational> = None;
+        let mut best: Option<C::Scalar> = None;
         for hit in self.hits(arc, &point.y) {
             if &hit.site == source { continue; }
             if best.as_ref().is_none_or(|x| ray_order(&point.x, direction, &hit.x, x) == Ordering::Less) {
@@ -370,29 +378,30 @@ impl<'a> Boundary<'a> {
         }
         Ok(best.map(|x| {
             let route = contact_route(&point.x, &x, direction);
-            NearestContacts { boundary: *self, arc, level: point.y, x, route,
+            let level = match point { Cow::Borrowed(point) => point.y.clone(), Cow::Owned(point) => point.y };
+            NearestContacts { boundary: *self, arc, level, x, route,
                 source: source.clone(), occurrence: self.arc_occurrences(arc),
                 runs: self.runs(arc), active_run: None, next_edge: None, seen_start: false }
         }))
     }
 }
 
-pub struct Hits<'a, 'b, 's, 'l> {
-    boundary: Boundary<'a>,
-    arc: &'b Arc<'s>,
-    level: &'l Rational,
-    occurrences: ArcOccurrences<'a, 'b, 's>,
-    runs: SideRuns<'s>,
-    active_run: Option<SideRun<'s>>,
+pub struct Hits<'a, 'b, 's, 'l, C: Curve = Input> {
+    boundary: Boundary<'a, C>,
+    arc: &'b Arc<'s, C::Scalar>,
+    level: &'l C::Scalar,
+    occurrences: ArcOccurrences<'a, 'b, 's, C>,
+    runs: SideRuns<'s, C::Scalar>,
+    active_run: Option<SideRun<'s, C::Scalar>>,
     next_edge: Option<EdgeId>,
     seen_start: bool,
 }
 
-fn next_interior_hit<'s>(
-    boundary: &Boundary<'_>, arc: &Arc<'_>, level: &Rational,
-    runs: &mut SideRuns<'s>, active_run: &mut Option<SideRun<'s>>,
+fn next_interior_hit<'s, C: Curve>(
+    boundary: &Boundary<'_, C>, arc: &Arc<'_, C::Scalar>, level: &C::Scalar,
+    runs: &mut SideRuns<'s, C::Scalar>, active_run: &mut Option<SideRun<'s, C::Scalar>>,
     next_edge: &mut Option<EdgeId>, seen_start: &mut bool,
-) -> Option<Contact> {
+) -> Option<Contact<C::Scalar>> {
     loop {
         if next_edge.is_none() {
             *active_run = runs.next();
@@ -403,11 +412,9 @@ fn next_interior_hit<'s>(
         if Some(edge) != run.last_edge() {
             *next_edge = Some(EdgeId(if run.side == Side::Left { edge.0 + 1 } else { edge.0 - 1 }));
         }
-        let a = boundary.input.vertex(VertexId(edge.0));
-        let b = boundary.input.vertex(VertexId(edge.0 + 1));
-        let Some((t, x)) = horizontal_hit(a, b, level) else { continue; };
+        let Some((t, x)) = boundary.input.horizontal_hit(edge, level) else { continue; };
         // Vertices are enumerated by occurrence, not by their supporting edges.
-        if t.is_zero() || t.is_one() { continue; }
+        if t.is_zero_value() || t.compare_one() == Ordering::Equal { continue; }
         if !run.contains_parameter(edge, &t) { continue; }
         let site = Site::Edge { edge, t, side: run.side };
         if arc.full_circuit && &site == arc.start {
@@ -418,9 +425,9 @@ fn next_interior_hit<'s>(
     }
 }
 
-impl Iterator for Hits<'_, '_, '_, '_> {
-    type Item = Contact;
-    fn next(&mut self) -> Option<Contact> {
+impl<C: Curve> Iterator for Hits<'_, '_, '_, '_, C> {
+    type Item = Contact<C::Scalar>;
+    fn next(&mut self) -> Option<Self::Item> {
         for site in self.occurrences.by_ref() {
             let Site::Vertex { vertex, .. } = &site else { unreachable!() };
             let point = self.boundary.input.vertex(*vertex);
@@ -433,22 +440,22 @@ impl Iterator for Hits<'_, '_, '_, '_> {
 
 /// Every item has this object's stored route, including a full wrapping return
 /// at the source coordinates. No allocated contact list is required.
-pub struct NearestContacts<'a, 'b, 's> {
-    boundary: Boundary<'a>,
-    arc: &'b Arc<'s>,
-    level: Rational,
-    pub x: Rational,
+pub struct NearestContacts<'a, 'b, 's, C: Curve = Input> {
+    boundary: Boundary<'a, C>,
+    arc: &'b Arc<'s, C::Scalar>,
+    level: C::Scalar,
+    pub x: C::Scalar,
     pub route: Route,
-    source: Site,
-    occurrence: ArcOccurrences<'a, 'b, 's>,
-    runs: SideRuns<'s>,
-    active_run: Option<SideRun<'s>>,
+    source: Site<C::Scalar>,
+    occurrence: ArcOccurrences<'a, 'b, 's, C>,
+    runs: SideRuns<'s, C::Scalar>,
+    active_run: Option<SideRun<'s, C::Scalar>>,
     next_edge: Option<EdgeId>,
     seen_start: bool,
 }
-impl Iterator for NearestContacts<'_, '_, '_> {
-    type Item = Contact;
-    fn next(&mut self) -> Option<Contact> {
+impl<C: Curve> Iterator for NearestContacts<'_, '_, '_, C> {
+    type Item = Contact<C::Scalar>;
+    fn next(&mut self) -> Option<Self::Item> {
         for site in self.occurrence.by_ref() {
             let Site::Vertex { vertex, .. } = &site else { unreachable!() };
             let point = self.boundary.input.vertex(*vertex);
@@ -467,6 +474,94 @@ impl Iterator for NearestContacts<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::symbolic::Symbolic;
+
+    // Deliberately neither Copy nor Clone: iterators borrow this actual curved
+    // symbolic geometry rather than copying a backend or straightening its edges.
+    struct SymbolicPeak {
+        points: [Point<Symbolic<'static>>; 3],
+    }
+    impl Curve for SymbolicPeak {
+        type Scalar = Symbolic<'static>;
+        const MAX_LEAF_EDGES: usize = 2;
+        fn len(&self) -> usize { self.points.len() }
+        fn vertex(&self, vertex: VertexId) -> Cow<'_, Point<Self::Scalar>> {
+            Cow::Borrowed(&self.points[vertex.0])
+        }
+        fn edge_y_sign(&self, edge: EdgeId) -> Ordering {
+            self.points[edge.0 + 1].y.cmp(&self.points[edge.0].y)
+        }
+        fn turn(&self, _: VertexId) -> Ordering { Ordering::Less }
+        fn horizontal_hit(&self, edge: EdgeId, level: &Self::Scalar) -> Option<(Self::Scalar, Self::Scalar)> {
+            let a = &self.points[edge.0];
+            let b = &self.points[edge.0 + 1];
+            let t = level.minus(&a.y).over(&b.y.minus(&a.y));
+            if t < Self::Scalar::zero_value() || t > Self::Scalar::one_value() { return None; }
+            let x = self.edge_point(edge, &t).x;
+            Some((t, x))
+        }
+        fn edge_point(&self, edge: EdgeId, t: &Self::Scalar) -> Point<Self::Scalar> {
+            let a = &self.points[edge.0];
+            let b = &self.points[edge.0 + 1];
+            Point::new(a.x.plus(&t.times(t).times(&b.x.minus(&a.x))),
+                a.y.plus(&t.times(&b.y.minus(&a.y))))
+        }
+        fn edge_tangent(&self, edge: EdgeId, t: &Self::Scalar) -> Point<Self::Scalar> {
+            let a = &self.points[edge.0];
+            let b = &self.points[edge.0 + 1];
+            Point::new(Self::Scalar::from_usize_value(2).times(t).times(&b.x.minus(&a.x)),
+                b.y.minus(&a.y))
+        }
+    }
+
+    #[test]
+    fn symbolic_occurrences_and_clipped_contacts_use_actual_curved_edges() {
+        type S = Symbolic<'static>;
+        let scalar = |n: usize| S::from_usize_value(n);
+        let height = scalar(2).plus(&S::variable(0));
+        let curve = SymbolicPeak { points: [
+            Point::new(scalar(0), scalar(0)),
+            Point::new(scalar(1), height.clone()),
+            Point::new(scalar(2), scalar(1).negative()),
+        ] };
+        let boundary = Boundary::new(&curve, Chain::new(&curve, VertexId(0), VertexId(2)).unwrap()).unwrap();
+        let vertex = |index, side, slot| Site::<S>::Vertex { vertex: VertexId(index), side, slot };
+        let incoming = vertex(1, Side::Left, Slot::Incoming);
+        let outgoing = vertex(1, Side::Left, Slot::Outgoing);
+        assert_eq!(boundary.occurrences().count(), 8);
+        assert_eq!(boundary.direction(&incoming).unwrap(), Direction::Left);
+        assert_eq!(boundary.direction(&outgoing).unwrap(), Direction::Right);
+        let inside = vertex(1, Side::Right, Slot::Incoming);
+        assert_eq!(boundary.null_contact(&inside).unwrap(), Some(vertex(1, Side::Right, Slot::Outgoing)));
+        assert!(matches!(boundary.point(&incoming).unwrap(), Cow::Borrowed(_)));
+
+        let edge_site = |n, d| Site::Edge { edge: EdgeId(1), t: scalar(n).over(&scalar(d)), side: Side::Left };
+        let start = edge_site(1, 4);
+        let end = edge_site(1, 2);
+        let arc = boundary.arc(&start, &end, false).unwrap();
+        let contact = edge_site(3, 8);
+        let point = boundary.point(&contact).unwrap();
+        assert!(matches!(&point, Cow::Owned(_)));
+        assert_eq!(point.x, scalar(73).over(&scalar(64)));
+        assert_eq!(point.y, height.times(&scalar(5).over(&scalar(8))).minus(&scalar(3).over(&scalar(8))));
+        assert_eq!(boundary.hits(&arc, &point.y).collect::<Vec<_>>(),
+            vec![Contact { site: contact.clone(), x: point.x.clone() }]);
+        let excluded = boundary.point(&edge_site(3, 4)).unwrap();
+        assert_eq!(boundary.hits(&arc, &excluded.y).count(), 0);
+        assert_eq!(boundary.runs(&arc).map(SideRun::weight).sum::<usize>(), 1);
+        assert_eq!(boundary.runs(&arc).next().unwrap().clipped_interval(EdgeId(1)),
+            Some((scalar(1).over(&scalar(4)), scalar(1).over(&scalar(2)))));
+
+        let full = boundary.arc(&contact, &contact, true).unwrap();
+        assert_eq!(boundary.hits(&full, &point.y).filter(|hit| hit.site == contact).count(), 1);
+        let right_start = vertex(2, Side::Right, Slot::Single);
+        let right_end = vertex(1, Side::Right, Slot::Outgoing);
+        let right = boundary.arc(&right_start, &right_end, false).unwrap();
+        let nearest = boundary.nearest_contacts(&right, &contact, Direction::Right).unwrap().unwrap();
+        assert_eq!(nearest.route, Route::Wrap);
+        assert_eq!(nearest.map(|hit| hit.site).collect::<Vec<_>>(),
+            vec![Site::Edge { edge: EdgeId(1), t: scalar(3).over(&scalar(8)), side: Side::Right }]);
+    }
 
     fn v(index: usize, side: Side, slot: Slot) -> Site {
         Site::Vertex { vertex: VertexId(index), side, slot }

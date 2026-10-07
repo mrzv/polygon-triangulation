@@ -620,7 +620,10 @@ mod tests {
             }).collect();
             let remaining = map.chord_ids().filter(|&id| id != removed).map(|id| {
                 let (ends, route) = map.chord(id).unwrap();
-                VisibleChord { endpoints: [ends[0].clone(), ends[1].clone()], route }
+                VisibleChord {
+                    endpoints: [ends[0].clone(), ends[1].clone()], route,
+                    level: map.chord_level(id).unwrap().clone(),
+                }
             }).collect();
             let incomplete = Submap::from_verified_chords(&boundary, remaining, &mut work).unwrap();
             match close_visibility(&incomplete, &mut work) {

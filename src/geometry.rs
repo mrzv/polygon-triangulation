@@ -1,37 +1,40 @@
 //! Exact finite-chart geometry. Horizontal infinity is represented by a route,
 //! never by a synthetic coordinate.
 use num_rational::BigRational;
-use num_traits::Zero;
+use crate::scalar::ExactScalar;
 use std::cmp::Ordering;
 
 pub type Rational = BigRational;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Point {
-    pub x: Rational,
-    pub y: Rational,
+pub struct Point<S = Rational> {
+    pub x: S,
+    pub y: S,
+}
+
+impl<S> Point<S> {
+    pub fn new(x: S, y: S) -> Self { Self { x, y } }
 }
 
 impl Point {
-    pub fn new(x: Rational, y: Rational) -> Self { Self { x, y } }
     pub fn integer(x: i64, y: i64) -> Self {
         Self::new(Rational::from_integer(x.into()), Rational::from_integer(y.into()))
     }
 }
 
-pub fn orientation(a: &Point, b: &Point, c: &Point) -> Ordering {
-    ((&b.x - &a.x) * (&c.y - &a.y) - (&b.y - &a.y) * (&c.x - &a.x))
-        .cmp(&Rational::zero())
+pub fn orientation<S: ExactScalar>(a: &Point<S>, b: &Point<S>, c: &Point<S>) -> Ordering {
+    b.x.minus(&a.x).times(&c.y.minus(&a.y))
+        .minus(&b.y.minus(&a.y).times(&c.x.minus(&a.x))).sign()
 }
 
 /// Closed-edge intersection. The caller must supply a nonhorizontal edge.
-pub fn horizontal_hit(a: &Point, b: &Point, level: &Rational) -> Option<(Rational, Rational)> {
+pub fn horizontal_hit<S: ExactScalar>(a: &Point<S>, b: &Point<S>, level: &S) -> Option<(S, S)> {
     assert_ne!(a.y, b.y, "horizontal_hit requires a nonhorizontal edge");
     if level < std::cmp::min(&a.y, &b.y) || level > std::cmp::max(&a.y, &b.y) {
         return None;
     }
-    let t = (level - &a.y) / (&b.y - &a.y);
-    let x = &a.x + &t * (&b.x - &a.x);
+    let t = level.minus(&a.y).over(&b.y.minus(&a.y));
+    let x = a.x.plus(&t.times(&b.x.minus(&a.x)));
     Some((t, x))
 }
 
@@ -46,15 +49,15 @@ pub enum Route { Finite, Wrap, Null }
 
 /// Contact order on the horizontal circle: strict finite contacts precede
 /// wrapping contacts, including a different occurrence at the source X.
-pub fn ray_order(source: &Rational, direction: Direction, a: &Rational, b: &Rational) -> Ordering {
-    let finite = |x: &Rational| match direction { Direction::Left => x < source, Direction::Right => x > source };
+pub fn ray_order<S: Ord>(source: &S, direction: Direction, a: &S, b: &S) -> Ordering {
+    let finite = |x: &S| match direction { Direction::Left => x < source, Direction::Right => x > source };
     match finite(b).cmp(&finite(a)) {
         Ordering::Equal => match direction { Direction::Right => a.cmp(b), Direction::Left => b.cmp(a) },
         order => order,
     }
 }
 
-pub fn contact_route(source: &Rational, target: &Rational, direction: Direction) -> Route {
+pub fn contact_route<S: Ord>(source: &S, target: &S, direction: Direction) -> Route {
     if match direction { Direction::Left => target < source, Direction::Right => target > source } {
         Route::Finite
     } else { Route::Wrap }
@@ -63,6 +66,7 @@ pub fn contact_route(source: &Rational, target: &Rational, direction: Direction)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_traits::Zero;
     #[test]
     fn exact_clipping_and_circular_contact_order() {
         let a = Point::integer(0, 0);

@@ -157,6 +157,16 @@ impl<'a> Catalogue<'a> {
 
     pub fn input(&self) -> &'a Input { self.input }
     pub fn grade_count(&self) -> usize { self.grades.len() }
+    /// Move the whole-curve map into the down-phase without copying topology.
+    ///
+    /// Its saved oracle is removed. Down-phase queries use strictly smaller
+    /// grades; attempting to query the removed entry returns `MissingSaved`.
+    pub fn take_root(&mut self) -> Result<Submap<'a>, CutError> {
+        let mu = grade(self.input.edge_count());
+        let missing = || CutError::MissingSaved { grade: mu, start: VertexId(0) };
+        let root = self.grades.get_mut(mu).ok_or_else(missing)?.pop().ok_or_else(missing)?;
+        Ok(root.oracle.into_map())
+    }
     pub fn saved(&self, mu: usize, start: VertexId) -> Result<&SavedChain<'a>, CutError> {
         let length = span(mu)?;
         if start.0 % length != 0 { return Err(CutError::Unaligned { grade: mu, start }); }
@@ -218,14 +228,16 @@ impl<'a> Catalogue<'a> {
         Ok(map)
     }
 
+    /// Replace the caller's scratch contents, retaining its allocation.
     pub fn cut_arc<'c>(&'c self, boundary: Boundary<'a>, start: &Site, end: &Site,
-        full: bool, max_saved_grade: usize) -> Result<Vec<Piece<'c, 'a>>, CutError>
+        full: bool, max_saved_grade: usize, pieces: &mut Vec<Piece<'c, 'a>>)
+        -> Result<(), CutError>
     {
+        pieces.clear();
         if !std::ptr::eq(boundary.input(), self.input) { return Err(CutError::DifferentInput); }
         let start = boundary.normalize_site(start)?;
         let end = boundary.normalize_site(end)?;
         let arc = boundary.arc(&start, &end, full)?;
-        let mut pieces = Vec::new();
         for run in boundary.runs(&arc) {
             let begin = pieces.len();
             let (low, high) = if run.side == Side::Left { (run.from, run.to) } else { (run.to, run.from) };
@@ -243,15 +255,22 @@ impl<'a> Catalogue<'a> {
                 }
             };
             let last = match high { Position::Vertex(v) => v, Position::Edge { edge, .. } => VertexId(edge.0) };
-            for aligned in partition(first, last, max_saved_grade)? {
-                pieces.push(Piece::Saved { chain: self.saved(aligned.grade, aligned.start)?, side: run.side });
+            if first.0 > last.0 { return Err(CutError::InvalidInterval); }
+            let mut at = first.0;
+            while at < last.0 {
+                let remaining = last.0 - at;
+                let fits = (usize::BITS - 1 - remaining.leading_zeros()) as usize;
+                let aligned = if at == 0 { fits } else { at.trailing_zeros() as usize };
+                let mu = fits.min(aligned).min(max_saved_grade);
+                pieces.push(Piece::Saved { chain: self.saved(mu, VertexId(at))?, side: run.side });
+                at += span(mu)?;
             }
             if let Position::Edge { edge, t } = high {
                 pieces.push(Piece::Edge { edge, side: run.side, start: Rational::zero(), end: t.clone() });
             }
             if run.side == Side::Right { pieces[begin..].reverse(); }
         }
-        Ok(pieces)
+        Ok(())
     }
 }
 
@@ -394,7 +413,8 @@ mod tests {
         let b = boundary(&input);
         let start = edge(3, 1, 4, Side::Left);
         let end = edge(1, 3, 4, Side::Left);
-        let pieces = saved.cut_arc(b, &start, &end, false, 1).unwrap();
+        let mut pieces = Vec::new();
+        saved.cut_arc(b, &start, &end, false, 1, &mut pieces).unwrap();
         assert_eq!(pieces.iter().filter(|p| matches!(p, Piece::Edge { .. })).count(), 2);
         let actual = edge_order(&pieces);
         let mut expected = Vec::new();
@@ -413,21 +433,24 @@ mod tests {
         let saved = catalogue(&input);
         let b = boundary(&input);
         let cap = vertex(0, Side::Left);
-        assert!(saved.cut_arc(b, &cap, &cap, false, 1).unwrap().is_empty());
-        let full = saved.cut_arc(b, &cap, &cap, true, 1).unwrap();
-        assert_eq!(edge_order(&full).len(), 16);
-        assert!(full.iter().all(|p| matches!(p, Piece::Saved { .. })));
+        let mut pieces = Vec::new();
+        saved.cut_arc(b, &cap, &cap, false, 1, &mut pieces).unwrap();
+        assert!(pieces.is_empty());
+        saved.cut_arc(b, &cap, &cap, true, 1, &mut pieces).unwrap();
+        assert_eq!(edge_order(&pieces).len(), 16);
+        assert!(pieces.iter().all(|p| matches!(p, Piece::Saved { .. })));
         let from = edge(2, 3, 4, Side::Right);
         let to = edge(2, 1, 4, Side::Right);
-        let cut = saved.cut_arc(b, &from, &to, false, 1).unwrap();
-        assert_eq!(edge_order(&cut), [(Side::Right, 2,
+        saved.cut_arc(b, &from, &to, false, 1, &mut pieces).unwrap();
+        assert_eq!(edge_order(&pieces), [(Side::Right, 2,
             Rational::new(1.into(), 4.into()), Rational::new(3.into(), 4.into()))]);
-        let normalized = saved.cut_arc(b, &edge(0, 0, 1, Side::Left),
-            &edge(1, 1, 1, Side::Left), false, 1).unwrap();
-        assert_eq!(edge_order(&normalized), [(Side::Left, 0, Rational::zero(), Rational::one()),
+        saved.cut_arc(b, &edge(0, 0, 1, Side::Left),
+            &edge(1, 1, 1, Side::Left), false, 1, &mut pieces).unwrap();
+        assert_eq!(edge_order(&pieces), [(Side::Left, 0, Rational::zero(), Rational::one()),
             (Side::Left, 1, Rational::zero(), Rational::one())]);
+        drop(pieces);
         let only_base = Catalogue { input: &input, grades: saved.grades.into_iter().take(1).collect() };
-        assert!(matches!(only_base.cut_arc(b, &cap, &vertex(4, Side::Left), false, 2),
+        assert!(matches!(only_base.cut_arc(b, &cap, &vertex(4, Side::Left), false, 2, &mut Vec::new()),
             Err(CutError::MissingSaved { grade: 2, .. })));
     }
 
