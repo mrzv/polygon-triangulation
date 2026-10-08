@@ -619,8 +619,11 @@ mod tests {
     // ALL intersections, including a tangency missed by endpoint order tests.
     struct Graph<'a> {
         edge: EdgeId,
+        projective: bool,
         low: Symbolic<'a>,
         high: Symbolic<'a>,
+        x_low: Symbolic<'a>,
+        x_high: Symbolic<'a>,
         n: [Symbolic<'a>; 2],
         d: [Symbolic<'a>; 2],
     }
@@ -658,8 +661,12 @@ mod tests {
                 let d = if projective { [Symbolic::zero_value(), Symbolic::one_value()] }
                     else if sign == Ordering::Less { [slope.negative(), Symbolic::one_value().minus(&intercept)] }
                     else { [slope.clone(), Symbolic::one_value().plus(&intercept)] };
-                graphs.push(Graph { edge, low: std::cmp::min(pair[0].y.clone(), pair[1].y.clone()),
-                    high: std::cmp::max(pair[0].y.clone(), pair[1].y.clone()), n: [slope, intercept], d });
+                let x0 = if projective { pair[0].x.clone() } else { compact(&pair[0].x) };
+                let x1 = if projective { pair[1].x.clone() } else { compact(&pair[1].x) };
+                graphs.push(Graph { edge, projective, low: std::cmp::min(pair[0].y.clone(), pair[1].y.clone()),
+                    high: std::cmp::max(pair[0].y.clone(), pair[1].y.clone()),
+                    x_low: std::cmp::min(x0.clone(), x1.clone()),
+                    x_high: std::cmp::max(x0, x1), n: [slope, intercept], d });
             }
         }
         graphs
@@ -668,13 +675,24 @@ mod tests {
         let graphs = graphs(p);
         for (i, a) in graphs.iter().enumerate() {
             for b in &graphs[i + 1..] {
+                // Each chart branch is fractional linear without a pole, so
+                // its X extrema occur at endpoints. Strictly disjoint closed
+                // boxes cannot intersect; touching boxes retain the full audit.
+                if a.x_high < b.x_low || b.x_high < a.x_low { continue; }
                 let low = std::cmp::max(a.low.clone(), b.low.clone());
                 let high = std::cmp::min(a.high.clone(), b.high.clone());
                 if low > high { continue; }
-                let quadratic = a.n[0].times(&b.d[0]).minus(&b.n[0].times(&a.d[0]));
-                let linear = a.n[0].times(&b.d[1]).plus(&a.n[1].times(&b.d[0]))
-                    .minus(&b.n[0].times(&a.d[1])).minus(&b.n[1].times(&a.d[0]));
-                let constant = a.n[1].times(&b.d[1]).minus(&b.n[1].times(&a.d[1]));
+                let (quadratic, linear, constant) = if !a.projective && !b.projective {
+                    // Compactification is strictly increasing on finite X.
+                    // Two finite branches intersect exactly when their affine
+                    // preimages do; no chart-denominator products are needed.
+                    (Symbolic::zero_value(), a.n[0].minus(&b.n[0]), a.n[1].minus(&b.n[1]))
+                } else {
+                    (a.n[0].times(&b.d[0]).minus(&b.n[0].times(&a.d[0])),
+                        a.n[0].times(&b.d[1]).plus(&a.n[1].times(&b.d[0]))
+                            .minus(&b.n[0].times(&a.d[1])).minus(&b.n[1].times(&a.d[0])),
+                        a.n[1].times(&b.d[1]).minus(&b.n[1].times(&a.d[1])))
+                };
                 let evaluate = |y| quadratic.times(y).plus(&linear).times(y).plus(&constant);
                 let at_low = evaluate(&low);
                 let at_high = evaluate(&high);

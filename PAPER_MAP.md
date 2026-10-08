@@ -422,6 +422,12 @@ internal edges twice. Concave chains, collinearity, extrema, full returns, null
 regions, both cap runs, shared-level fusion events, helper-generated remote cuts
 and degree-changing contractions have dedicated regressions.
 
+The ribbon simplicity diagnostic rejects only strictly disjoint closed chart
+bounds. Finite/alias pairs compare their raw affine preimages under the common
+injective compactification; mixed/projective pairs retain exact quadratic
+crossing and tangency checks. Touching bounds and chart-seam incidences remain
+audited.
+
 The down-phase uses the derived bound
 `gamma_next = 2^ceil(ceil(log2(gamma))/5) + 2`: a final original arc inherits one
 temporary support arc and at most one trimmed original edge at each endpoint.
