@@ -425,8 +425,10 @@ and degree-changing contractions have dedicated regressions.
 The ribbon simplicity diagnostic rejects only strictly disjoint closed chart
 bounds. Finite/alias pairs compare their raw affine preimages under the common
 injective compactification; mixed/projective pairs retain exact quadratic
-crossing and tangency checks. Touching bounds and chart-seam incidences remain
-audited.
+crossing and tangency checks. Interior critical points are detected by endpoint
+derivative signs; their values use the exact `(4*a*c - b*b)/(4*a)` sign identity,
+without constructing nested symbolic ratios. Touching bounds and chart-seam
+incidences remain audited.
 
 The down-phase uses the derived bound
 `gamma_next = 2^ceil(ceil(log2(gamma))/5) + 2`: a final original arc inherits one

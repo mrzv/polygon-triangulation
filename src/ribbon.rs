@@ -708,12 +708,24 @@ mod tests {
                 assert!(!(at_low.sign() != Ordering::Equal && at_high.sign() != Ordering::Equal && at_low.sign() != at_high.sign()),
                     "crossing {:?} {:?}", a.edge, b.edge);
                 if !quadratic.is_zero_value() {
-                    let extremum = linear.negative().over(&quadratic.times(&super::constant(2)));
-                    if extremum > low && extremum < high {
-                        let value = evaluate(&extremum);
-                        assert!(!value.is_zero_value(), "tangent edges");
+                    // Opposite endpoint derivative signs put the critical point
+                    // strictly inside. Its value has sign (4*a*c - b*b)/(4*a);
+                    // do not construct and substitute a nested symbolic ratio.
+                    let derivative_slope = quadratic.times(&super::constant(2));
+                    let low_derivative = derivative_slope.times(&low).plus(&linear).sign();
+                    let high_derivative = derivative_slope.times(&high).plus(&linear).sign();
+                    if low_derivative != Ordering::Equal && high_derivative != Ordering::Equal
+                        && low_derivative != high_derivative {
+                        let numerator = quadratic.times(&constant).times(&super::constant(4))
+                            .minus(&linear.times(&linear));
+                        let value_sign = if quadratic.sign() == Ordering::Less {
+                            numerator.sign().reverse()
+                        } else {
+                            numerator.sign()
+                        };
+                        assert!(value_sign != Ordering::Equal, "tangent edges");
                         for endpoint in [&at_low, &at_high] {
-                            assert!(endpoint.is_zero_value() || endpoint.sign() == value.sign(), "interior double crossing");
+                            assert!(endpoint.is_zero_value() || endpoint.sign() == value_sign, "interior double crossing");
                         }
                     }
                 }
