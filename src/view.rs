@@ -75,6 +75,11 @@ impl<'a> OffsetView<'a> {
         Point::new(a.x.plus(&t.times(&Symbolic::owned(incoming.x))),
             a.y.plus(&t.times(&Symbolic::owned(incoming.y))))
     }
+    fn raw_edge_y(&self, edge: EdgeId, t: &Symbolic<'a>) -> Symbolic<'a> {
+        let a = self.raw_vertex(VertexId(edge.0)).y;
+        let b = self.raw_vertex(VertexId(edge.0 + 1)).y;
+        a.plus(&t.times(&b.minus(&a)))
+    }
     pub fn raw_edge_point(&self, edge: EdgeId, t: &Symbolic<'a>) -> Point<Symbolic<'a>> {
         let a = self.raw_vertex(VertexId(edge.0));
         let b = self.raw_vertex(VertexId(edge.0 + 1));
@@ -130,11 +135,12 @@ impl<'a> OffsetView<'a> {
     }
     /// Recover the actual support residue, not the nominal view parameter.
     /// Miter endpoints can move along the Root support before taking the limit.
+    /// Projection omits the unused X interpolation.
     pub fn project_parameter(&self, edge: EdgeId, t: &Symbolic<'a>) -> Result<Rational, LimitError> {
-        let p = self.raw_edge_point(edge, t);
+        let y = self.raw_edge_y(edge, t);
         let a = self.input.vertex(VertexId(edge.0));
         let b = self.input.vertex(VertexId(edge.0 + 1));
-        p.y.minus(&Symbolic::borrowed(&a.y))
+        y.minus(&Symbolic::borrowed(&a.y))
             .over(&Symbolic::owned(&b.y - &a.y)).finite_limit()
     }
 }

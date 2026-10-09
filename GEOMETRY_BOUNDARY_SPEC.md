@@ -451,6 +451,8 @@ line-by-line transcription of the paper's unspecified perturbation.
   Wrap levels are not displaced clipping thresholds; saved probes compare
   reevaluated endpoints and source levels without rebuilding saved topology.
   This prevents recursive Contact(Contact) expressions across merge depth.
+- Offset support projection evaluates the actual Y interpolation and its Root
+  residue without constructing the unused X interpolation.
 - Alias/helper primitives have bounded description and algebraic depth. Every
   local programme disappears after collapse; exact coefficient/bit costs are
   not asserted to be constant.
