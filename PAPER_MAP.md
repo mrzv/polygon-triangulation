@@ -422,6 +422,10 @@ internal edges twice. Concave chains, collinearity, extrema, full returns, null
 regions, both cap runs, shared-level fusion events, helper-generated remote cuts
 and degree-changing contractions have dedicated regressions.
 
+`cargo test` uses an optimized test profile for the exact symbolic diagnostics.
+Debug assertions and overflow checks remain enabled; optimization does not
+remove fixtures or geometric checks.
+
 The ribbon simplicity diagnostic rejects only strictly disjoint closed chart
 bounds. Finite/alias bounds and equations use raw affine preimages under the
 common injective compactification; mixed/projective pairs retain exact quadratic
