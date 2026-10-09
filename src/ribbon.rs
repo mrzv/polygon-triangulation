@@ -624,6 +624,8 @@ mod tests {
         high: Symbolic<'a>,
         x_low: Symbolic<'a>,
         x_high: Symbolic<'a>,
+        raw_x_low: Symbolic<'a>,
+        raw_x_high: Symbolic<'a>,
         n: [Symbolic<'a>; 2],
         d: [Symbolic<'a>; 2],
     }
@@ -661,12 +663,19 @@ mod tests {
                 let d = if projective { [Symbolic::zero_value(), Symbolic::one_value()] }
                     else if sign == Ordering::Less { [slope.negative(), Symbolic::one_value().minus(&intercept)] }
                     else { [slope.clone(), Symbolic::one_value().plus(&intercept)] };
-                let x0 = if projective { pair[0].x.clone() } else { compact(&pair[0].x) };
-                let x1 = if projective { pair[1].x.clone() } else { compact(&pair[1].x) };
+                let (raw_x_low, raw_x_high) = if pair[0].x <= pair[1].x {
+                    (pair[0].x.clone(), pair[1].x.clone())
+                } else {
+                    (pair[1].x.clone(), pair[0].x.clone())
+                };
+                let (x_low, x_high) = if projective {
+                    (raw_x_low.clone(), raw_x_high.clone())
+                } else {
+                    (compact(&raw_x_low), compact(&raw_x_high))
+                };
                 graphs.push(Graph { edge, projective, low: std::cmp::min(pair[0].y.clone(), pair[1].y.clone()),
                     high: std::cmp::max(pair[0].y.clone(), pair[1].y.clone()),
-                    x_low: std::cmp::min(x0.clone(), x1.clone()),
-                    x_high: std::cmp::max(x0, x1), n: [slope, intercept], d });
+                    x_low, x_high, raw_x_low, raw_x_high, n: [slope, intercept], d });
             }
         }
         graphs
@@ -675,10 +684,16 @@ mod tests {
         let graphs = graphs(p);
         for (i, a) in graphs.iter().enumerate() {
             for b in &graphs[i + 1..] {
-                // Each chart branch is fractional linear without a pole, so
-                // its X extrema occur at endpoints. Strictly disjoint closed
-                // boxes cannot intersect; touching boxes retain the full audit.
-                if a.x_high < b.x_low || b.x_high < a.x_low { continue; }
+                // Endpoint bounds are exact for each monotone chart branch.
+                // Finite pairs use their common injective preimage as well as
+                // its affine equation, avoiding redundant chart denominators.
+                let (a_low, a_high, b_low, b_high) = if !a.projective && !b.projective {
+                    (&a.raw_x_low, &a.raw_x_high, &b.raw_x_low, &b.raw_x_high)
+                } else {
+                    (&a.x_low, &a.x_high, &b.x_low, &b.x_high)
+                };
+                // Strict disjointness only: touching boxes retain the audit.
+                if a_high < b_low || b_high < a_low { continue; }
                 let low = std::cmp::max(a.low.clone(), b.low.clone());
                 let high = std::cmp::min(a.high.clone(), b.high.clone());
                 if low > high { continue; }
