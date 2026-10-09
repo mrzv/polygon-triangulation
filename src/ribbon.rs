@@ -701,22 +701,31 @@ mod tests {
                 let low = std::cmp::max(a.low.clone(), b.low.clone());
                 let high = std::cmp::min(a.high.clone(), b.high.clone());
                 if low > high { continue; }
+                // Translate by an exact rational level, not a numeric epsilon.
+                // Cancel the common base level before quadratic products expand.
+                let origin = Symbolic::owned(low.finite_limit().expect("finite ribbon level"));
+                let a_n1 = a.n[1].plus(&a.n[0].times(&origin));
+                let b_n1 = b.n[1].plus(&b.n[0].times(&origin));
+                let local_low = low.minus(&origin);
+                let local_high = high.minus(&origin);
                 let (quadratic, linear, constant) = if !a.projective && !b.projective {
                     // Compactification is strictly increasing on finite X.
                     // Two finite branches intersect exactly when their affine
                     // preimages do; no chart-denominator products are needed.
                     (Symbolic::zero_value(),
                         a.n[0].times(&b.raw_d).minus(&b.n[0].times(&a.raw_d)),
-                        a.n[1].times(&b.raw_d).minus(&b.n[1].times(&a.raw_d)))
+                        a_n1.times(&b.raw_d).minus(&b_n1.times(&a.raw_d)))
                 } else {
+                    let a_d1 = a.d[1].plus(&a.d[0].times(&origin));
+                    let b_d1 = b.d[1].plus(&b.d[0].times(&origin));
                     (a.n[0].times(&b.d[0]).minus(&b.n[0].times(&a.d[0])),
-                        a.n[0].times(&b.d[1]).plus(&a.n[1].times(&b.d[0]))
-                            .minus(&b.n[0].times(&a.d[1])).minus(&b.n[1].times(&a.d[0])),
-                        a.n[1].times(&b.d[1]).minus(&b.n[1].times(&a.d[1])))
+                        a.n[0].times(&b_d1).plus(&a_n1.times(&b.d[0]))
+                            .minus(&b.n[0].times(&a_d1)).minus(&b_n1.times(&a.d[0])),
+                        a_n1.times(&b_d1).minus(&b_n1.times(&a_d1)))
                 };
                 let evaluate = |y| quadratic.times(y).plus(&linear).times(y).plus(&constant);
-                let at_low = evaluate(&low);
-                let at_high = evaluate(&high);
+                let at_low = evaluate(&local_low);
+                let at_high = evaluate(&local_high);
                 for (y, value) in [(&low, &at_low), (&high, &at_high)] {
                     if value.is_zero_value() {
                         let adjacent = a.edge.0.abs_diff(b.edge.0) == 1
@@ -733,8 +742,8 @@ mod tests {
                     // strictly inside. Its value has sign (4*a*c - b*b)/(4*a);
                     // do not construct and substitute a nested symbolic ratio.
                     let derivative_slope = quadratic.times(&super::constant(2));
-                    let low_derivative = derivative_slope.times(&low).plus(&linear).sign();
-                    let high_derivative = derivative_slope.times(&high).plus(&linear).sign();
+                    let low_derivative = derivative_slope.times(&local_low).plus(&linear).sign();
+                    let high_derivative = derivative_slope.times(&local_high).plus(&linear).sign();
                     if low_derivative != Ordering::Equal && high_derivative != Ordering::Equal
                         && low_derivative != high_derivative {
                         let numerator = quadratic.times(&constant).times(&super::constant(4))

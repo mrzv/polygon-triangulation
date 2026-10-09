@@ -431,6 +431,8 @@ without constructing nested symbolic ratios. Touching bounds and chart-seam
 incidences remain audited.
 Its homogeneous line coefficients retain nonzero delta-Y scales instead of
 constructing symbolic slopes; intersection tests clear those scales exactly.
+Pairs translate the level coordinate by an exact rational origin before forming
+quadratic coefficients, cancelling common base levels without approximation.
 
 The down-phase uses the derived bound
 `gamma_next = 2^ceil(ceil(log2(gamma))/5) + 2`: a final original arc inherits one
