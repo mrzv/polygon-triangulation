@@ -6,6 +6,8 @@
 //! Fractions need no polynomial gcd: decisive leading products compare directly;
 //! tied products stream exact coefficient groups until the first nonzero
 //! difference (or complete equality). Residues compare leading monomials.
+//! Known whole polynomial factors also cancel up to an exact sign before products
+//! expand; this is not general polynomial factorization.
 //! Expression size and coefficient/exponent bit costs are not constant-time.
 use crate::geometry::Rational;
 use crate::scalar::ExactScalar;
@@ -75,6 +77,14 @@ impl<'a> Coefficient<'a> {
     fn is_zero(&self) -> bool { self.value().is_zero() }
     fn is_one(&self) -> bool { self.value().is_one() }
     fn sign(&self) -> Ordering { self.value().numer().cmp(&0.into()) }
+
+    fn opposite(&self, other: &Self) -> bool {
+        let a = self.value();
+        let b = other.value();
+        a.denom() == b.denom()
+            && a.numer().sign() != b.numer().sign()
+            && a.numer().magnitude() == b.numer().magnitude()
+    }
 
     fn plus(&self, other: &Self) -> Self {
         if self.is_zero() { return other.clone(); }
@@ -382,6 +392,17 @@ impl<'a> Polynomial<'a> {
                     a.monomial == b.monomial && a.coefficient.value() == b.coefficient.value()
                 })
             ),
+            _ => false,
+        }
+    }
+
+    fn opposite(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Constant(a), Self::Constant(b)) => a.opposite(b),
+            (Self::Terms(a), Self::Terms(b)) => a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(a, b)| {
+                    a.monomial == b.monomial && a.coefficient.opposite(&b.coefficient)
+                }),
             _ => false,
         }
     }
@@ -768,6 +789,8 @@ impl ExactScalar for Symbolic<'_> {
         // Cancel known whole factors before multiplication, not after expansion.
         if a.same(&d) { return Self::fraction(c, b); }
         if b.same(&c) { return Self::fraction(a, d); }
+        if a.opposite(&d) { return Self::fraction(c.negative(), b); }
+        if b.opposite(&c) { return Self::fraction(a.negative(), d); }
         Self::fraction(a.times(&c), b.times(&d))
     }
 
@@ -782,6 +805,7 @@ impl ExactScalar for Symbolic<'_> {
         let (c, d) = other.parts();
         if b.same(&d) { return Self::fraction(a, c); }
         if a.same(&c) { return Self::fraction(d, b); }
+        if a.opposite(&c) { return Self::fraction(d.negative(), b); }
         Self::fraction(a.times(&d), b.times(&c))
     }
 
@@ -941,6 +965,26 @@ mod tests {
         assert_eq!(x.plus(&y).minus(&y).minus(&x).sign(), Ordering::Equal);
         assert!(x.times(&c) > y.times(&c));
         assert!(x.times(&b) < y.times(&b));
+    }
+
+    #[test]
+    fn signed_whole_factors_preserve_values_and_normalized_signs() {
+        let x = Symbolic::variable(0);
+        let y = Symbolic::variable(127);
+        let numerator = integer(2).plus(&x);
+        let denominator = integer(3).minus(&y);
+        let other_denominator = integer(4).plus(&x);
+        let fraction = numerator.over(&denominator);
+        let product = fraction.times(&denominator.negative());
+        assert_eq!(product, numerator.negative());
+        assert_eq!(product.finite_limit(), Ok(rational(-2, 1)));
+        assert_eq!(numerator.negative().over(&denominator).times(&y.over(&numerator)),
+            y.negative().over(&denominator));
+        assert_eq!(fraction.over(&numerator.negative().over(&other_denominator)),
+            other_denominator.negative().over(&denominator));
+        // Matching monomials alone must not cancel unequal coefficient magnitudes.
+        assert_eq!(fraction.times(&denominator.times(&integer(-2))),
+            numerator.times(&integer(-2)));
     }
 
     #[test]
