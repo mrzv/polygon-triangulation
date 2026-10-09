@@ -628,6 +628,7 @@ mod tests {
         raw_x_high: Symbolic<'a>,
         n: [Symbolic<'a>; 2],
         d: [Symbolic<'a>; 2],
+        raw_d: Symbolic<'a>,
     }
     fn graphs<'a>(p: &Programme<'a>) -> Vec<Graph<'a>> {
         let mut graphs = Vec::new();
@@ -657,12 +658,15 @@ mod tests {
             }
             for pair in points.windows(2) {
                 if pair[0].y == pair[1].y { continue; } // two charts of ONE seam incidence
-                let slope = pair[1].x.minus(&pair[0].x).over(&pair[1].y.minus(&pair[0].y));
-                let intercept = pair[0].x.minus(&slope.times(&pair[0].y));
+                // Homogeneous line coefficients avoid dividing by a symbolic
+                // delta-Y before every subsequent intersection comparison.
+                let dx = pair[1].x.minus(&pair[0].x);
+                let dy = pair[1].y.minus(&pair[0].y);
+                let intercept = pair[0].x.times(&dy).minus(&dx.times(&pair[0].y));
                 let sign = pair[0].x.plus(&pair[1].x).sign();
-                let d = if projective { [Symbolic::zero_value(), Symbolic::one_value()] }
-                    else if sign == Ordering::Less { [slope.negative(), Symbolic::one_value().minus(&intercept)] }
-                    else { [slope.clone(), Symbolic::one_value().plus(&intercept)] };
+                let d = if projective { [Symbolic::zero_value(), dy.clone()] }
+                    else if sign == Ordering::Less { [dx.negative(), dy.minus(&intercept)] }
+                    else { [dx.clone(), dy.plus(&intercept)] };
                 let (raw_x_low, raw_x_high) = if pair[0].x <= pair[1].x {
                     (pair[0].x.clone(), pair[1].x.clone())
                 } else {
@@ -675,7 +679,7 @@ mod tests {
                 };
                 graphs.push(Graph { edge, projective, low: std::cmp::min(pair[0].y.clone(), pair[1].y.clone()),
                     high: std::cmp::max(pair[0].y.clone(), pair[1].y.clone()),
-                    x_low, x_high, raw_x_low, raw_x_high, n: [slope, intercept], d });
+                    x_low, x_high, raw_x_low, raw_x_high, n: [dx, intercept], d, raw_d: dy });
             }
         }
         graphs
@@ -701,7 +705,9 @@ mod tests {
                     // Compactification is strictly increasing on finite X.
                     // Two finite branches intersect exactly when their affine
                     // preimages do; no chart-denominator products are needed.
-                    (Symbolic::zero_value(), a.n[0].minus(&b.n[0]), a.n[1].minus(&b.n[1]))
+                    (Symbolic::zero_value(),
+                        a.n[0].times(&b.raw_d).minus(&b.n[0].times(&a.raw_d)),
+                        a.n[1].times(&b.raw_d).minus(&b.n[1].times(&a.raw_d)))
                 } else {
                     (a.n[0].times(&b.d[0]).minus(&b.n[0].times(&a.d[0])),
                         a.n[0].times(&b.d[1]).plus(&a.n[1].times(&b.d[0]))
