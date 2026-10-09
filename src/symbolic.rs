@@ -3,13 +3,15 @@
 //! `variable(i + 1)` is smaller than every positive power of `variable(i)`.
 //! Sparse monomials are ordered by exponents from the last variable to the first;
 //! the smallest exponent vector supplies a polynomial's leading coefficient.
-//! Fractions need no polynomial gcd: equality clears denominators exactly, and
-//! the residue compares leading monomials after common monomial cancellation.
+//! Fractions need no polynomial gcd: decisive leading products compare directly;
+//! cancellation still uses exact denominator clearing. The residue compares
+//! leading monomials after common monomial cancellation.
 //! Expression size and coefficient/exponent bit costs are not constant-time.
 use crate::geometry::Rational;
 use crate::scalar::ExactScalar;
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 use num_traits::{One, ToPrimitive, Zero};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -105,6 +107,27 @@ impl<'a> Coefficient<'a> {
     fn negative(&self) -> Self {
         if self.is_zero() { return Self::Zero; }
         Self::owned(-self.value())
+    }
+
+    fn product_cmp(a: &Self, b: &Self, c: &Self, d: &Self) -> Ordering {
+        if b.value() == d.value() {
+            return match b.sign() {
+                Ordering::Less => a.value().cmp(c.value()).reverse(),
+                Ordering::Equal => Ordering::Equal,
+                Ordering::Greater => a.value().cmp(c.value()),
+            };
+        }
+        fn product(factors: [&BigInt; 4]) -> Cow<'_, BigInt> {
+            let mut value = Cow::Borrowed(factors[0]);
+            for factor in &factors[1..] {
+                if factor.is_one() { continue; }
+                value = if value.is_one() { Cow::Borrowed(*factor) } else { Cow::Owned(value.as_ref() * *factor) };
+            }
+            value
+        }
+        let (a, b, c, d) = (a.value(), b.value(), c.value(), d.value());
+        product([a.numer(), b.numer(), c.denom(), d.denom()])
+            .cmp(&product([c.numer(), d.numer(), a.denom(), b.denom()]))
     }
 }
 
@@ -239,6 +262,31 @@ impl Monomial {
         }
         debug_assert!(divisors.next().is_none());
         Self::from_powers(powers)
+    }
+
+    /// Compare products in exponent order without allocating their power arrays.
+    fn product_cmp(a: &Self, b: &Self, c: &Self, d: &Self) -> Ordering {
+        let mut powers = [
+            a.powers().iter().rev().peekable(), b.powers().iter().rev().peekable(),
+            c.powers().iter().rev().peekable(), d.powers().iter().rev().peekable(),
+        ];
+        fn sum<'b>(a: &'b Exponent, b: &'b Exponent) -> Cow<'b, Exponent> {
+            if a.is_zero() { Cow::Borrowed(b) }
+            else if b.is_zero() { Cow::Borrowed(a) }
+            else { Cow::Owned(a.plus(b)) }
+        }
+        while let Some(index) = powers.iter_mut().filter_map(|p| p.peek().map(|power| power.0)).max() {
+            let zero = Exponent::Small(0);
+            let mut degrees = [&zero; 4];
+            for (power, degree) in powers.iter_mut().zip(&mut degrees) {
+                if power.peek().is_some_and(|power| power.0 == index) {
+                    *degree = &power.next().unwrap().1;
+                }
+            }
+            let order = sum(degrees[0], degrees[1]).cmp(&sum(degrees[2], degrees[3]));
+            if order != Ordering::Equal { return order; }
+        }
+        Ordering::Equal
     }
 }
 
@@ -639,8 +687,23 @@ impl Ord for Symbolic<'_> {
         if let (Value::Constant(a), Value::Constant(b)) = (&self.value, &other.value) {
             return a.value().cmp(b.value());
         }
+        let sign = self.sign();
+        let other_sign = other.sign();
+        if sign != other_sign { return sign.cmp(&other_sign); }
+        if sign == Ordering::Equal { return Ordering::Equal; }
         let (a, b) = self.parts();
         let (c, d) = other.parts();
+        let (am, ac) = a.leading();
+        let (bm, bc) = b.leading();
+        let (cm, cc) = c.leading();
+        let (dm, dc) = d.leading();
+        let monomial_order = Monomial::product_cmp(&am, &dm, &cm, &bm);
+        if monomial_order != Ordering::Equal {
+            return if sign == Ordering::Greater { monomial_order.reverse() } else { monomial_order };
+        }
+        let coefficient_order = Coefficient::product_cmp(ac, dc, cc, bc);
+        if coefficient_order != Ordering::Equal { return coefficient_order; }
+        // Equal leading products can cancel; only the full difference decides.
         if b.same(&d) { return a.minus(&c).sign(); }
         a.times(&d).minus(&c.times(&b)).sign()
     }
@@ -654,6 +717,36 @@ impl PartialOrd for Symbolic<'_> {
 mod tests {
     use super::*;
     use num_bigint::BigInt;
+
+    #[test]
+    fn ordering_matches_exact_differences_after_leading_cancellation() {
+        let epsilon = Symbolic::variable(0);
+        let eta = Symbolic::variable(127);
+        let square = epsilon.times(&epsilon);
+        let mut promoted = epsilon.clone();
+        for _ in 0..33 { promoted = promoted.times(&promoted); }
+        let inverse = integer(1).over(&promoted);
+        let mut values = vec![
+            integer(0), integer(1), integer(-1), epsilon.clone(), epsilon.negative(),
+            square.clone(), eta.clone(), eta.negative(), promoted, inverse.clone(), inverse.negative(),
+            integer(1).plus(&epsilon), integer(1).plus(&eta),
+            integer(1).plus(&epsilon).over(&integer(1).plus(&eta)),
+        ];
+        for index in 0..24 {
+            let numerator = integer(index % 5 - 2)
+                .plus(&epsilon.times(&integer(index % 3 - 1)))
+                .plus(&eta.times(&integer(index % 7 - 3)));
+            let mut denominator = integer(index % 3 + 1)
+                .plus(&square.times(&integer(index % 5 - 2)));
+            if index % 2 == 0 { denominator = denominator.negative(); }
+            values.push(numerator.over(&denominator));
+        }
+        for a in &values {
+            for b in &values {
+                assert_eq!(a.cmp(b), a.minus(b).sign(), "{a:?} versus {b:?}");
+            }
+        }
+    }
 
     fn integer(value: i64) -> Symbolic<'static> {
         Symbolic::owned(Rational::from_integer(value.into()))

@@ -438,6 +438,8 @@ line-by-line transcription of the paper's unspecified perturbation.
   infinitesimals. Coefficients and polynomials share storage; normal exponents
   are inline, with arbitrary-precision promotion on overflow. Sign and equality
   use algebraic values, never variable IDs as geometric tie breakers.
+  Ordering compares exact leading monomial/coefficient products first; equal
+  leading products still require the full polynomial difference.
 - A retained chord carries `LevelSource::Vertex` or `Frozen`. The generic kernel
   supports arbitrary certified frozen augmentations. Production refinement
   requires normalized Vertex sources: bounded leaves use actual Programme
