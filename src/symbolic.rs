@@ -6,8 +6,8 @@
 //! Fractions need no polynomial gcd: decisive leading products compare directly;
 //! tied products stream exact coefficient groups until the first nonzero
 //! difference (or complete equality). Residues compare leading monomials.
-//! Known whole polynomial factors also cancel up to an exact sign before products
-//! expand; this is not general polynomial factorization.
+//! Known whole polynomial factors also cancel up to a certified rational scale
+//! before products expand; this is not general polynomial factorization.
 //! Expression size and coefficient/exponent bit costs are not constant-time.
 use crate::geometry::Rational;
 use crate::scalar::ExactScalar;
@@ -407,6 +407,25 @@ impl<'a> Polynomial<'a> {
         }
     }
 
+    /// Return `self / other` only for an exact whole-polynomial rational scale.
+    fn scaled_ratio(&self, other: &Self) -> Option<Coefficient<'a>> {
+        match (self, other) {
+            (Self::Constant(a), Self::Constant(b)) if !b.is_zero() => Some(a.over(b)),
+            (Self::Terms(a), Self::Terms(b)) if a.len() == b.len()
+                && a[0].monomial == b[0].monomial =>
+            {
+                let alpha = &a[0].coefficient;
+                let beta = &b[0].coefficient;
+                a.iter().zip(b.iter()).skip(1).all(|(a, b)| {
+                    a.monomial == b.monomial
+                        && Coefficient::product_cmp(&a.coefficient, beta, &b.coefficient, alpha)
+                            == Ordering::Equal
+                }).then(|| alpha.over(beta))
+            }
+            _ => None,
+        }
+    }
+
     fn plus(&self, other: &Self) -> Self {
         if self.is_zero() { return other.clone(); }
         if other.is_zero() { return self.clone(); }
@@ -791,6 +810,12 @@ impl ExactScalar for Symbolic<'_> {
         if b.same(&c) { return Self::fraction(a, d); }
         if a.opposite(&d) { return Self::fraction(c.negative(), b); }
         if b.opposite(&c) { return Self::fraction(a.negative(), d); }
+        if let Some(scale) = a.scaled_ratio(&d) {
+            return Self::fraction(c.scale(&scale, false), b);
+        }
+        if let Some(scale) = c.scaled_ratio(&b) {
+            return Self::fraction(a.scale(&scale, false), d);
+        }
         Self::fraction(a.times(&c), b.times(&d))
     }
 
@@ -806,6 +831,12 @@ impl ExactScalar for Symbolic<'_> {
         if b.same(&d) { return Self::fraction(a, c); }
         if a.same(&c) { return Self::fraction(d, b); }
         if a.opposite(&c) { return Self::fraction(d.negative(), b); }
+        if let Some(scale) = d.scaled_ratio(&b) {
+            return Self::fraction(a.scale(&scale, false), c);
+        }
+        if let Some(scale) = a.scaled_ratio(&c) {
+            return Self::fraction(d.scale(&scale, false), b);
+        }
         Self::fraction(a.times(&d), b.times(&c))
     }
 
@@ -982,9 +1013,32 @@ mod tests {
             y.negative().over(&denominator));
         assert_eq!(fraction.over(&numerator.negative().over(&other_denominator)),
             other_denominator.negative().over(&denominator));
-        // Matching monomials alone must not cancel unequal coefficient magnitudes.
+        // Signed matching must retain a non-unit coefficient scale.
         assert_eq!(fraction.times(&denominator.times(&integer(-2))),
             numerator.times(&integer(-2)));
+    }
+
+    #[test]
+    fn rationally_scaled_factors_preserve_full_coefficient_ratios() {
+        let x = Symbolic::variable(0);
+        let y = Symbolic::variable(127);
+        let numerator = integer(2).plus(&x);
+        let denominator = integer(3).minus(&y);
+        let other_denominator = integer(4).plus(&x);
+        let scale = Symbolic::owned(rational(-3, 7));
+        let scaled = denominator.times(&scale);
+        let fraction = numerator.over(&denominator);
+        let product = fraction.times(&scaled);
+        assert_eq!(product, numerator.times(&scale));
+        assert_eq!(product.finite_limit(), Ok(rational(-6, 7)));
+        assert_eq!(scaled.over(&other_denominator).times(&x.over(&denominator)),
+            x.times(&scale).over(&other_denominator));
+        assert_eq!(fraction.over(&x.over(&scaled)), numerator.times(&scale).over(&x));
+        assert_eq!(scaled.over(&denominator), scale);
+        // An equal leading ratio does not certify the remaining coefficients.
+        let near = scaled.plus(&y);
+        assert_eq!(fraction.times(&near),
+            numerator.times(&scale).plus(&numerator.times(&y).over(&denominator)));
     }
 
     #[test]

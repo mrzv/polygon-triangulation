@@ -442,7 +442,8 @@ line-by-line transcription of the paper's unspecified perturbation.
   products stream all equal-monomial coefficient groups exactly, stopping only
   at the first nonzero difference; equality exhausts both streams.
   Multiplication and division cancel known whole polynomial factors, including
-  exact opposite factors, before expansion; no general polynomial gcd is used.
+  exact rational scales certified against every canonical coefficient, before
+  expansion; no general polynomial gcd is used.
 - A retained chord carries `LevelSource::Vertex` or `Frozen`. The generic kernel
   supports arbitrary certified frozen augmentations. Production refinement
   requires normalized Vertex sources: bounded leaves use actual Programme
