@@ -4,8 +4,8 @@
 //! Sparse monomials are ordered by exponents from the last variable to the first;
 //! the smallest exponent vector supplies a polynomial's leading coefficient.
 //! Fractions need no polynomial gcd: decisive leading products compare directly;
-//! cancellation still uses exact denominator clearing. The residue compares
-//! leading monomials after common monomial cancellation.
+//! tied products stream exact coefficient groups until the first nonzero
+//! difference (or complete equality). Residues compare leading monomials.
 //! Expression size and coefficient/exponent bit costs are not constant-time.
 use crate::geometry::Rational;
 use crate::scalar::ExactScalar;
@@ -13,7 +13,7 @@ use num_bigint::{BigInt, BigUint};
 use num_traits::{One, ToPrimitive, Zero};
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -367,6 +367,13 @@ impl<'a> Polynomial<'a> {
         terms.iter().cloned().chain(constant)
     }
 
+    fn term_ref<'p>(&'p self, index: usize, unit: &'p Monomial) -> Option<(&'p Monomial, &'p Coefficient<'a>)> {
+        match self {
+            Self::Constant(coefficient) => (index == 0 && !coefficient.is_zero()).then_some((unit, coefficient)),
+            Self::Terms(terms) => terms.get(index).map(|term| (&term.monomial, &term.coefficient)),
+        }
+    }
+
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Constant(a), Self::Constant(b)) => a.value() == b.value(),
@@ -482,6 +489,132 @@ impl<'a> Polynomial<'a> {
             monomial: term.monomial.divide_factor(factor), coefficient: term.coefficient,
         }).collect())
     }
+}
+
+/// Product priorities borrow both factors; no product monomial is constructed.
+#[derive(Clone, Copy)]
+struct ProductTerm<'p, 'a> {
+    left_monomial: &'p Monomial,
+    left_coefficient: &'p Coefficient<'a>,
+    right_monomial: &'p Monomial,
+    right_coefficient: &'p Coefficient<'a>,
+    row: usize,
+    column: usize,
+}
+
+impl ProductTerm<'_, '_> {
+    fn monomial_cmp(&self, other: &Self) -> Ordering {
+        Monomial::product_cmp(self.left_monomial, self.right_monomial, other.left_monomial, other.right_monomial)
+    }
+
+    fn coefficient_sign(&self) -> Ordering {
+        if self.left_coefficient.sign() == self.right_coefficient.sign() { Ordering::Greater } else { Ordering::Less }
+    }
+
+    fn coefficient(&self) -> Rational {
+        self.left_coefficient.value() * self.right_coefficient.value()
+    }
+}
+
+impl Ord for ProductTerm<'_, '_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.monomial_cmp(other).reverse()
+            .then_with(|| other.row.cmp(&self.row))
+            .then_with(|| other.column.cmp(&self.column))
+    }
+}
+
+impl PartialOrd for ProductTerm<'_, '_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+impl PartialEq for ProductTerm<'_, '_> {
+    fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal }
+}
+
+impl Eq for ProductTerm<'_, '_> {}
+
+/// Each sorted row is seeded when its predecessor's first product is consumed.
+/// Translation-invariant monomial order makes every not-yet-seeded row later
+/// than that predecessor. Every pair is visited once, only as far as needed.
+struct ProductStream<'p, 'a> {
+    left: &'p Polynomial<'a>,
+    right: &'p Polynomial<'a>,
+    unit: &'p Monomial,
+    pending: BinaryHeap<ProductTerm<'p, 'a>>,
+}
+
+impl<'p, 'a> ProductStream<'p, 'a> {
+    fn new(left: &'p Polynomial<'a>, right: &'p Polynomial<'a>, unit: &'p Monomial) -> Self {
+        let mut stream = Self { left, right, unit, pending: BinaryHeap::new() };
+        stream.push(0, 0);
+        stream
+    }
+
+    fn push(&mut self, row: usize, column: usize) {
+        if let (Some((lm, lc)), Some((rm, rc))) = (self.left.term_ref(row, self.unit), self.right.term_ref(column, self.unit)) {
+            self.pending.push(ProductTerm { left_monomial: lm, left_coefficient: lc,
+                right_monomial: rm, right_coefficient: rc, row, column });
+        }
+    }
+
+    fn next(&mut self) -> Option<ProductTerm<'p, 'a>> {
+        let term = self.pending.pop()?;
+        self.push(term.row, term.column + 1);
+        if term.column == 0 { self.push(term.row + 1, 0); }
+        Some(term)
+    }
+
+    fn singleton(&self, term: &ProductTerm<'p, 'a>) -> bool {
+        self.pending.peek().is_none_or(|next| next.monomial_cmp(term) != Ordering::Equal)
+    }
+}
+
+/// The caller has established equality of the unique leading products.
+/// Group every equal product monomial before deciding its exact coefficient.
+fn product_tail_sign<'a>(a: &Polynomial<'a>, b: &Polynomial<'a>, c: &Polynomial<'a>, d: &Polynomial<'a>) -> Ordering {
+    let unit = Monomial::default();
+    let mut left = ProductStream::new(a, b, &unit);
+    let mut right = ProductStream::new(c, d, &unit);
+    left.next();
+    right.next();
+    let mut l = left.next();
+    let mut r = right.next();
+    while l.is_some() || r.is_some() {
+        let key = match (l, r) {
+            (Some(a), Some(b)) => if a.monomial_cmp(&b) == Ordering::Greater { b } else { a },
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => unreachable!(),
+        };
+        let same_left = l.filter(|term| term.monomial_cmp(&key) == Ordering::Equal);
+        let same_right = r.filter(|term| term.monomial_cmp(&key) == Ordering::Equal);
+        let left_single = same_left.is_some() && left.singleton(&key);
+        let right_single = same_right.is_some() && right.singleton(&key);
+        match (same_left, same_right) {
+            (Some(a), Some(b)) if left_single && right_single => {
+                let order = Coefficient::product_cmp(a.left_coefficient, a.right_coefficient, b.left_coefficient, b.right_coefficient);
+                l = left.next();
+                r = right.next();
+                if order != Ordering::Equal { return order; }
+                continue;
+            }
+            (Some(a), None) if left_single => return a.coefficient_sign(),
+            (None, Some(b)) if right_single => return b.coefficient_sign().reverse(),
+            _ => {}
+        }
+        let mut coefficient = Rational::zero();
+        while let Some(term) = l.filter(|term| term.monomial_cmp(&key) == Ordering::Equal) {
+            coefficient += term.coefficient();
+            l = left.next();
+        }
+        while let Some(term) = r.filter(|term| term.monomial_cmp(&key) == Ordering::Equal) {
+            coefficient -= term.coefficient();
+            r = right.next();
+        }
+        let order = coefficient.numer().cmp(ZERO.numer());
+        if order != Ordering::Equal { return order; }
+    }
+    Ordering::Equal
 }
 
 #[derive(Clone, Debug)]
@@ -703,9 +836,9 @@ impl Ord for Symbolic<'_> {
         }
         let coefficient_order = Coefficient::product_cmp(ac, dc, cc, bc);
         if coefficient_order != Ordering::Equal { return coefficient_order; }
-        // Equal leading products can cancel; only the full difference decides.
+        // Cancellation is exact, but only the first nonzero coefficient is needed.
         if b.same(&d) { return a.minus(&c).sign(); }
-        a.times(&d).minus(&c.times(&b)).sign()
+        product_tail_sign(&a, &d, &c, &b)
     }
 }
 
@@ -741,6 +874,16 @@ mod tests {
             if index % 2 == 0 { denominator = denominator.negative(); }
             values.push(numerator.over(&denominator));
         }
+        let tail = epsilon.plus(&square).plus(&eta);
+        let common = integer(1).minus(&epsilon).plus(&eta.times(&integer(2)));
+        let numerator = integer(1).plus(&tail);
+        let denominator = integer(1).plus(&tail.times(&integer(2)));
+        let cancelled = numerator.over(&denominator);
+        values.extend([
+            cancelled.clone(), cancelled.negative(),
+            integer(1).plus(&tail.times(&integer(4))).over(&integer(1).plus(&tail.times(&integer(5)))),
+            numerator.times(&common).over(&denominator.times(&common)),
+        ]);
         for a in &values {
             for b in &values {
                 assert_eq!(a.cmp(b), a.minus(b).sign(), "{a:?} versus {b:?}");

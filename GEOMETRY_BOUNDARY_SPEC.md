@@ -438,8 +438,9 @@ line-by-line transcription of the paper's unspecified perturbation.
   infinitesimals. Coefficients and polynomials share storage; normal exponents
   are inline, with arbitrary-precision promotion on overflow. Sign and equality
   use algebraic values, never variable IDs as geometric tie breakers.
-  Ordering compares exact leading monomial/coefficient products first; equal
-  leading products still require the full polynomial difference.
+  Ordering compares exact leading monomial/coefficient products first. Tied
+  products stream all equal-monomial coefficient groups exactly, stopping only
+  at the first nonzero difference; equality exhausts both streams.
 - A retained chord carries `LevelSource::Vertex` or `Frozen`. The generic kernel
   supports arbitrary certified frozen augmentations. Production refinement
   requires normalized Vertex sources: bounded leaves use actual Programme
